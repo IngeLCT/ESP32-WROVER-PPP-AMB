@@ -343,7 +343,17 @@ static void ppp_gsm_task(void *arg)
     }
     at_send_and_expect("ATE0", "OK", PPP_AT_TIMEOUT_MS);
     at_send_and_expect("AT+CMEE=2", "OK", PPP_AT_TIMEOUT_MS);
-    // SIM PIN (optional)
+    // --- NUEVO: flow control y (opcional) LTE-only ---
+#if PPP_HW_FLOWCTRL
+    at_send_and_expect("AT+IFC=2,2", "OK", PPP_AT_TIMEOUT_MS);   // HW RTS/CTS
+#else
+    at_send_and_expect("AT+IFC=0,0", "OK", PPP_AT_TIMEOUT_MS);   // sin HW flow
+#endif
+#if PPP_FORCE_LTE
+    at_send_and_expect("AT+CNMP=38", "OK", PPP_AT_TIMEOUT_MS);   // LTE-only
+#endif
+
+    // SIM PIN (opcional)
     if (strlen(PPP_SIM_PIN) > 0) {
         char cpin[64];
         snprintf(cpin, sizeof(cpin), "AT+CPIN=\"%s\"", PPP_SIM_PIN);
@@ -356,20 +366,8 @@ static void ppp_gsm_task(void *arg)
     snprintf(cgdcont, sizeof(cgdcont), "AT+CGDCONT=1,\"IP\",\"%s\"", PPP_APN);
     at_send_and_expect(cgdcont, "OK", PPP_AT_TIMEOUT_MS);
 
-    // Align SIMCom data profile with Telcel APN/auth
-    char cncfg[160];
-    bool cncfg_ok = false;
-    snprintf(cncfg, sizeof(cncfg), "AT+CNCFG=0,1,\"%s\",\"%s\",\"%s\"", PPP_APN, PPP_USER, PPP_PASS);
-    cncfg_ok = at_send_and_expect(cncfg, "OK", PPP_AT_TIMEOUT_MS);
-    if (!cncfg_ok) {
-        snprintf(cncfg, sizeof(cncfg), "AT+CNCFG=0,1,\"%s\"", PPP_APN);
-        if (!at_send_and_expect(cncfg, "OK", PPP_AT_TIMEOUT_MS)) {
-            ESP_LOGW(TAG, "AT+CNCFG failed, continuing without profile");
-        }
-    }
-    if (!at_send_and_expect("AT+CSOCKSETPN=1", "OK", PPP_AT_TIMEOUT_MS)) {
-        ESP_LOGW(TAG, "AT+CSOCKSETPN failed");
-    }
+    // Nota: No usamos +CNCFG ni +CSOCKSETPN con PPP en A76xx.
+    // PPP usa el stack de LwIP en el ESP32; esos comandos son para el stack de sockets interno del modem.
 
     // Query and log info
     at_log_basic_info();
@@ -392,7 +390,7 @@ static void ppp_gsm_task(void *arg)
     at_send_and_expect("AT+CGACT=1,1", "OK", 10000);    
     ESP_LOGI(TAG, "Switching to data mode...");
     bool entered = false;
-    const char *cmd1 = PPP_DIAL;
+    const char *cmd1 = PPP_DIAL; // ahora por defecto "AT+CGDATA=\"PPP\",1"
     const char *cmd2 = (strstr(PPP_DIAL, "CGDATA") != NULL) ? "ATD*99***1#" : "AT+CGDATA=\"PPP\",1";
     ESP_LOGI(TAG, "Dial attempt 1: %s", cmd1);
     if (at_send_and_expect(cmd1, "CONNECT", PPP_CONNECT_TIMEOUT_MS)) {

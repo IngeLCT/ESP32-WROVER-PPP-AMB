@@ -31,7 +31,7 @@
 #define PPP_PASS                  "webgprs2002"
 
 // For SIM7600/A76xx, use CGDATA to enter PPP data mode
-#define PPP_DIAL                  "ATD*99***1#"
+#define PPP_DIAL  "AT+CGDATA=\"PPP\",1"
 
 // Timeouts (ms)
 #define PPP_AT_TIMEOUT_MS         5000

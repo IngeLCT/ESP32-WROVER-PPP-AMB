@@ -13,7 +13,6 @@
 #include "esp_sntp.h"
 
 // Project
-#include "ppp_gsm.h"
 #include "unwiredlabs.h"
 #include "sensors.h"
 #include "firebase.h"
@@ -194,37 +193,10 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_LOGI(TAG_APP, "Starting PPPoS modem...");
-    ppp_gsm_start();
-    if (!ppp_gsm_wait_connected(120000)) {
-        ESP_LOGE(TAG_APP, "PPP not connected in time");
-        return;
-    }
-    ESP_LOGI(TAG_APP, "PPP connected, requesting location/time...");
+    ESP_LOGI(TAG_APP, "PPP modem support removed; skipping cellular setup.");
+    ESP_LOGI(TAG_APP, "Ensure alternative connectivity is available before network operations.");
 
-    ppp_cell_info_t ci = {0};
-    if (ppp_gsm_get_cell_info(&ci)) {
-        ESP_LOGI(TAG_APP, "Cell: MCC=%d MNC=%d TAC=%u CID=%u", ci.mcc, ci.mnc, ci.tac, ci.cell_id);
-    }
-
-    char city[64] = {0}, state[64] = {0}, date[32] = {0}, timebuf[16] = {0};
-    bool ok = unwiredlabs_geolocate(UNWIREDLABS_TOKEN,
-                                    ci.mcc, ci.mnc, ci.tac, ci.cell_id,
-                                    city, sizeof(city),
-                                    state, sizeof(state),
-                                    date, sizeof(date),
-                                    timebuf, sizeof(timebuf));
-    if (ok) {
-        ESP_LOGI(TAG_APP, "Ubicacion: %s-%s", city[0] ? city : "?", state[0] ? state : "?");
-        ESP_LOGI(TAG_APP, "Fecha: %s Hora: %s", date[0] ? date : "?", timebuf[0] ? timebuf : "?");
-        char city_state[140];
-        snprintf(city_state, sizeof(city_state), "%s-%s", city, state);
-        sensors_set_city_state(city_state);
-    } else {
-        ESP_LOGW(TAG_APP, "Unwiredlabs request failed");
-    }
-
-    // SNTP time sync over PPP for consistent timestamps/token refresh
+    // Optionally keep SNTP if another network transport is available.
     init_sntp_and_time();
 
     // Init sensors

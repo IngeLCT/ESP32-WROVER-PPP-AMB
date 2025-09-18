@@ -25,31 +25,54 @@
 static const char *TAG_APP = "app";
 static esp_modem_dce_t *g_dce = NULL;
 
+// ---- Ciudad global para el JSON ----
+static char g_city[64]  = "----";
+static char g_state[64] = "";
+static bool g_city_sent = false;   // <-- NUEVO: solo mandar "ciudad" la primera vez
+
+#ifndef UNWIREDLABS_TOKEN
+#define UNWIREDLABS_TOKEN "" // define en Privado.h
+#endif
+#ifndef DEVICE_ID
+#define DEVICE_ID "ESP32-PPP"
+#endif
+
 static void init_sntp_and_time(void) {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
     esp_sntp_init();
-    setenv("TZ", "UTC6", 1); // GMT-6 as in Arduino post-processing
+    setenv("TZ", "UTC6", 1); // GMT-6
     tzset();
     for (int i = 0; i < 100; ++i) {
         time_t now = 0;
         time(&now);
-        if (now > 1609459200) break; // wait until ~2021-01-01
+        if (now > 1609459200) break; // ~2021-01-01
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
-#ifndef UNWIREDLABS_TOKEN
-#define UNWIREDLABS_TOKEN "" // set in Privado.h
-#endif
+/* Construye "Ciudad-Estado" sin comas (para CSV), con saneo básico */
+static void build_city_hyphen(char *dst, size_t dstlen, const char *city, const char *state) {
+    if (!dst || dstlen == 0) return;
+    const char *c = (city && city[0]) ? city : "----";
+    if (state && state[0]) {
+        snprintf(dst, dstlen, "%s-%s", c, state);
+    } else {
+        snprintf(dst, dstlen, "%s", c);
+    }
+    // Reemplaza cualquier coma accidental por '-'
+    for (size_t i = 0; dst[i]; ++i) {
+        if (dst[i] == ',' || dst[i] == ';' || dst[i] == '|') dst[i] = '-';
+    }
+}
 
 #define SENSOR_TASK_STACK 10240
 
 static void sensor_task(void *pv) {
     SensorData data;
 
-    // Inicio: hora de arranque (prefer SNTP)
+    // Hora de arranque (inicio)
     time_t start_epoch;
     struct tm start_tm_info;
     char inicio_str[20] = "00:00:00";
@@ -57,8 +80,7 @@ static void sensor_task(void *pv) {
     localtime_r(&start_epoch, &start_tm_info);
     strftime(inicio_str, sizeof(inicio_str), "%H:%M:%S", &start_tm_info);
 
-    bool first_send = true;
-    const uint32_t TOKEN_REFRESH_INTERVAL_SEC = 50 * 60; // 50 minutes
+    const uint32_t TOKEN_REFRESH_INTERVAL_SEC = 50 * 60; // 50 minutos
     time_t last_token_refresh = time(NULL);
 
     if (firebase_init() != 0) {
@@ -69,7 +91,7 @@ static void sensor_task(void *pv) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     firebase_delete("/historial_mediciones");
 
-    // Configuración de muestreo/envío: 1 muestra/minuto, envío cada 5 min
+    // 1 muestra/minuto, envío cada 5 min
     const int SAMPLE_EVERY_MIN = 1;
     const int SAMPLES_PER_BATCH = 5;
     const TickType_t SAMPLE_DELAY_TICKS = pdMS_TO_TICKS(SAMPLE_EVERY_MIN * 60000);
@@ -77,7 +99,6 @@ static void sensor_task(void *pv) {
 
     double sum_pm1p0=0, sum_pm2p5=0, sum_pm4p0=0, sum_pm10p0=0, sum_voc=0, sum_nox=0, sum_avg_temp=0, sum_avg_hum=0;
     uint32_t sum_co2 = 0;
-    char last_fecha_str[20] = "";
 
     while (1) {
         if (sensors_read(&data) == ESP_OK) {
@@ -99,16 +120,17 @@ static void sensor_task(void *pv) {
             ESP_LOGW(TAG_APP, "Error leyendo sensores (batch %d)", sample_count);
         }
 
+        // Refresh del token cada 50 min aprox
         time_t now_epoch_check = time(NULL);
         if ((now_epoch_check - last_token_refresh) >= TOKEN_REFRESH_INTERVAL_SEC) {
-            ESP_LOGI(TAG_APP, "Refrescando token (intervalo 50m)...");
+            ESP_LOGI(TAG_APP, "Refrescando token (50m)...");
             int r = firebase_refresh_token();
             if (r == 0) ESP_LOGI(TAG_APP, "Token refresh OK"); else ESP_LOGW(TAG_APP, "Fallo refresh token (%d)", r);
             last_token_refresh = now_epoch_check;
         }
 
         if (sample_count >= SAMPLES_PER_BATCH) {
-            // promedio
+            // Promedio del batch
             SensorData avg = {0};
             avg.pm1p0 = sum_pm1p0 / sample_count;
             avg.pm2p5 = sum_pm2p5 / sample_count;
@@ -133,32 +155,30 @@ static void sensor_task(void *pv) {
             char fecha_actual[20];
             strftime(fecha_actual, sizeof(fecha_actual), "%d-%m-%Y", &tm_info);
 
-            char json[384];
-            if (first_send) {
-                sensors_format_json(&avg, hora_envio, fecha_actual, inicio_str, json, sizeof(json));
-                strncpy(last_fecha_str, fecha_actual, sizeof(last_fecha_str)-1);
-                last_fecha_str[sizeof(last_fecha_str)-1] = '\0';
-                first_send = false;
+            char json[512];
+
+            if (!g_city_sent) {
+                // Primera vez: incluye "ciudad" (sin comas) y márcala como enviada
+                snprintf(json, sizeof(json),
+                    "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,"
+                     "\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,"
+                     "\"fecha\":\"%s\",\"inicio\":\"%s\",\"ciudad\":\"%s\",\"hora\":\"%s\",\"id\":\"%s\"}",
+                    avg.pm1p0, avg.pm2p5, avg.pm4p0, avg.pm10p0,
+                    avg.voc, avg.nox, avg.avg_temp, avg.avg_hum,
+                    avg.co2, fecha_actual, inicio_str, g_city, hora_envio, DEVICE_ID);
+                g_city_sent = true;  // <-- a partir de aquí ya no se manda "ciudad"
             } else {
-                if (strncmp(last_fecha_str, fecha_actual, sizeof(last_fecha_str)) != 0) {
-                    snprintf(json, sizeof(json),
-                        "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,\"fecha\":\"%s\",\"hora\":\"%s\"}",
-                        avg.pm1p0, avg.pm2p5, avg.pm4p0, avg.pm10p0,
-                        avg.voc, avg.nox, avg.avg_temp, avg.avg_hum,
-                        avg.co2, fecha_actual, hora_envio);
-                    strncpy(last_fecha_str, fecha_actual, sizeof(last_fecha_str)-1);
-                    last_fecha_str[sizeof(last_fecha_str)-1] = '\0';
-                } else {
-                    snprintf(json, sizeof(json),
-                        "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,\"hora\":\"%s\"}",
-                        avg.pm1p0, avg.pm2p5, avg.pm4p0, avg.pm10p0,
-                        avg.voc, avg.nox, avg.avg_temp, avg.avg_hum,
-                        avg.co2, hora_envio);
-                }
+                // Envíos subsecuentes: SIN "ciudad"
+                snprintf(json, sizeof(json),
+                    "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,"
+                     "\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,"
+                     "\"fecha\":\"%s\",\"inicio\":\"%s\",\"hora\":\"%s\",\"id\":\"%s\"}",
+                    avg.pm1p0, avg.pm2p5, avg.pm4p0, avg.pm10p0,
+                    avg.voc, avg.nox, avg.avg_temp, avg.avg_hum,
+                    avg.co2, fecha_actual, inicio_str, hora_envio, DEVICE_ID);
             }
 
-            int batch_minutes = SAMPLES_PER_BATCH * SAMPLE_EVERY_MIN;
-            ESP_LOGI(TAG_APP, "JSON promedio %dm: %s", batch_minutes, json);
+            ESP_LOGI(TAG_APP, "JSON promedio %dm: %s", SAMPLES_PER_BATCH * SAMPLE_EVERY_MIN, json);
             firebase_push("/historial_mediciones", json);
 
             // Retención aproximada por tamaño total (~10 MB)
@@ -179,6 +199,7 @@ static void sensor_task(void *pv) {
                 }
             }
 
+            // Reset de acumuladores
             sample_count = 0;
             sum_pm1p0=sum_pm2p5=sum_pm4p0=sum_pm10p0=sum_voc=sum_nox=sum_avg_temp=sum_avg_hum=0;
             sum_co2 = 0;
@@ -198,16 +219,15 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // === 1) Arranca PPP primero (misma config que Arduino) ===
+    // === 1) Arranca PPP ===
     modem_ppp_config_t cfg = {
         .tx_io = 26, .rx_io = 27,
-        .rts_io = -1, .cts_io = -1,     // sin flow control (igual que tu sketch)
+        .rts_io = -1, .cts_io = -1,     // sin flow control
         .dtr_io = 25,
         .rst_io = 5, .pwrkey_io = 4, .board_power_io = 12,
         .rst_active_low = true, .rst_pulse_ms = 200,
         .apn = "internet.itelcel.com",
-        .sim_pin = "",
-        .use_cmux = true                // igual que PPP.mode(ESP_MODEM_MODE_CMUX)
+        .use_cmux = false               // mantener en false
     };
     esp_err_t mret = modem_ppp_start_blocking(&cfg, 120000 /* 120s timeout */, &g_dce);
     if (mret != ESP_OK) {
@@ -215,10 +235,41 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(3000));
         esp_restart();
     }
-    // SNTP ya con Internet activo (PPP) ===
+
+    // === 2) SNTP con PPP activo ===
     init_sntp_and_time();
 
-    // Init sensors
+    // === 3) Geolocalización por celda ===
+    if (UNWIREDLABS_TOKEN[0]) {
+        int mcc=0, mnc=0, tac=0, cid=0;
+        if (modem_geolocate_from_cell(g_dce, &mcc, &mnc, &tac, &cid)) {
+            char city[64] = "", state[64] = "", fdate[16] = "", ftime[16] = "";
+            if (unwiredlabs_geolocate(UNWIREDLABS_TOKEN,
+                                      mcc, mnc, tac, cid,
+                                      city, sizeof(city),
+                                      state, sizeof(state),
+                                      fdate, sizeof(fdate),
+                                      ftime, sizeof(ftime))) {
+                // Guardar ciudad solo la primera vez, con "-" en vez de coma
+                build_city_hyphen(g_city, sizeof(g_city), city, state);
+                ESP_LOGI(TAG_APP, "Ciudad detectada (solo 1a vez): %s", g_city);
+            } else {
+                ESP_LOGW(TAG_APP, "No se pudo geolocalizar por celda. Ciudad='----'");
+                strncpy(g_city, "----", sizeof(g_city));
+                g_city[sizeof(g_city)-1] = '\0';
+            }
+        } else {
+            ESP_LOGW(TAG_APP, "AT+CPSI? no devolvió datos válidos. Ciudad='----'");
+            strncpy(g_city, "----", sizeof(g_city));
+            g_city[sizeof(g_city)-1] = '\0';
+        }
+    } else {
+        ESP_LOGW(TAG_APP, "UNWIREDLABS_TOKEN vacío. Ciudad quedará '----'");
+        strncpy(g_city, "----", sizeof(g_city));
+        g_city[sizeof(g_city)-1] = '\0';
+    }
+
+    // === 4) Sensores y task de envío a Firebase ===
     esp_err_t sret = sensors_init_all();
     if (sret != ESP_OK) {
         ESP_LOGE(TAG_APP, "Fallo al inicializar sensores: %s", esp_err_to_name(sret));

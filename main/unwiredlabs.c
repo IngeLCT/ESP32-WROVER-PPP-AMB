@@ -1,168 +1,155 @@
+#include "unwiredlabs.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
-
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
-#include "cJSON.h"
 
-static const char *TAG_UL = "unwired";
+static const char *TAG = "unwired";
 
-static int month_to_num(const char *abbr)
-{
-    if (!abbr || strlen(abbr) < 3) return 0;
-    const char *m = abbr;
-    if (!strncmp(m, "Jan", 3)) return 1;
-    if (!strncmp(m, "Feb", 3)) return 2;
-    if (!strncmp(m, "Mar", 3)) return 3;
-    if (!strncmp(m, "Apr", 3)) return 4;
-    if (!strncmp(m, "May", 3)) return 5;
-    if (!strncmp(m, "Jun", 3)) return 6;
-    if (!strncmp(m, "Jul", 3)) return 7;
-    if (!strncmp(m, "Aug", 3)) return 8;
-    if (!strncmp(m, "Sep", 3)) return 9;
-    if (!strncmp(m, "Oct", 3)) return 10;
-    if (!strncmp(m, "Nov", 3)) return 11;
-    if (!strncmp(m, "Dec", 3)) return 12;
-    return 0;
+// Cambia a EU si tu cuenta está ahí.
+#define UNWIRED_URL "https://us1.unwiredlabs.com/v2/process.php"
+
+typedef struct {
+    char *buf;
+    size_t cap;
+    size_t len;
+} resp_buf_t;
+
+static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
+    resp_buf_t *rb = (resp_buf_t *)evt->user_data;
+    switch (evt->event_id) {
+        case HTTP_EVENT_ON_DATA:
+            if (rb && evt->data_len > 0 && rb->buf && rb->cap > rb->len) {
+                size_t n = evt->data_len;
+                if (n > rb->cap - rb->len - 1) n = rb->cap - rb->len - 1;
+                if (n > 0) {
+                    memcpy(rb->buf + rb->len, evt->data, n);
+                    rb->len += n;
+                    rb->buf[rb->len] = '\0';
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return ESP_OK;
 }
 
-static void format_local_datetime_from_date_header(const char *date_hdr, int tz_offset_hours,
-                                                   char *out_date, size_t date_len,
-                                                   char *out_time, size_t time_len)
-{
-    // Expects e.g. "Tue, 19 Aug 2025 17:09:41 GMT"
-    if (!date_hdr) return;
-    char buf[128];
-    strlcpy(buf, date_hdr, sizeof(buf));
-    // Skip weekday and comma
-    char *p = strchr(buf, ',');
-    if (p) p += 2; else p = buf;
-    int day = atoi(p);
-    // Find month abbr
-    while (*p && *p != ' ') p++;
-    while (*p == ' ') p++;
-    char month_abbr[4] = {0};
-    strncpy(month_abbr, p, 3);
-    int month = month_to_num(month_abbr);
-    // Year
-    while (*p && *p != ' ') p++;
-    while (*p == ' ') p++;
-    int year = atoi(p);
-    // Time
-    while (*p && *p != ' ') p++;
-    while (*p == ' ') p++;
-    int hh = atoi(p);
-    int mm = 0, ss = 0;
-    char *colon = strchr(p, ':');
-    if (colon) mm = atoi(colon + 1);
-    char *colon2 = colon ? strchr(colon + 1, ':') : NULL;
-    if (colon2) ss = atoi(colon2 + 1);
-
-    // Apply tz offset (e.g., -6)
-    hh += tz_offset_hours;
-    while (hh < 0) { hh += 24; day -= 1; }
-    while (hh >= 24) { hh -= 24; day += 1; }
-    // Note: Simplified month/day adjust omitted for brevity
-
-    if (out_date && date_len)
-        snprintf(out_date, date_len, "%02d-%02d-%04d", day, month, year);
-    if (out_time && time_len)
-        snprintf(out_time, time_len, "%02d:%02d:%02d", hh, mm, ss);
+static bool json_get_string(const char *json, const char *key, char *out, size_t outlen) {
+    if (!json || !key || !out || outlen == 0) return false;
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+    const char *p = strstr(json, pat);
+    if (!p) return false;
+    p += strlen(pat);
+    const char *q = strchr(p, '"');
+    if (!q || q <= p) return false;
+    size_t n = (size_t)(q - p);
+    if (n >= outlen) n = outlen - 1;
+    memcpy(out, p, n);
+    out[n] = 0;
+    return true;
 }
 
 bool unwiredlabs_geolocate(const char *token,
-                           int mcc, int mnc, int tac, int cid,
-                           char *out_city, size_t city_len,
-                           char *out_state, size_t state_len,
-                           char *out_date, size_t date_len,
-                           char *out_time, size_t time_len)
+                           int mcc, int mnc, int tac_lac, int cid,
+                           char *city, size_t city_len,
+                           char *state, size_t state_len,
+                           char *date, size_t date_len,
+                           char *time, size_t time_len)
 {
-    if (!token || !*token) {
-        ESP_LOGE(TAG_UL, "Missing Unwired token");
+    if (city && city_len) city[0] = '\0';
+    if (state && state_len) state[0] = '\0';
+    if (date && date_len) date[0] = '\0';
+    if (time && time_len) time[0] = '\0';
+
+    if (!token || token[0] == '\0') {
+        ESP_LOGE(TAG, "Token vacío");
         return false;
     }
 
-    char json[256];
-    snprintf(json, sizeof(json),
-             "{\"token\":\"%s\",\"radio\":\"lte\",\"mcc\":%d,\"mnc\":%d,\"cells\":[{\"lac\":%d,\"cid\":%d}],\"address\":2}",
-             token, mcc, mnc, tac, cid);
+    char body[256];
+    int blen = snprintf(body, sizeof(body),
+        "{\"token\":\"%s\",\"radio\":\"lte\",\"mcc\":%d,\"mnc\":%d,"
+        "\"cells\":[{\"lac\":%d,\"cid\":%d,\"psc\":0}],\"address\":2}",
+        token, mcc, mnc, tac_lac, cid);
+    if (blen <= 0 || blen >= (int)sizeof(body)) {
+        ESP_LOGE(TAG, "Payload JSON demasiado grande");
+        return false;
+    }
+
+    char resp[2048] = {0};
+    resp_buf_t rb = { .buf = resp, .cap = sizeof(resp), .len = 0 };
 
     esp_http_client_config_t cfg = {
-        .url = "https://us1.unwiredlabs.com/v2/process.php",
+        .url = UNWIRED_URL,
         .method = HTTP_METHOD_POST,
+        .timeout_ms = 15000,
+        .event_handler = http_event_handler,
+        .user_data = &rb,
+        .disable_auto_redirect = false,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 10000,
+        .buffer_size = 1024,     // RX interno del cliente
+        .buffer_size_tx = 512,   // TX interno del cliente
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return false;
 
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json, strlen(json));
-
-    esp_err_t err = esp_http_client_perform(client);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG_UL, "HTTP perform failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
+    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+    if (!cli) {
+        ESP_LOGE(TAG, "No se pudo crear http client");
         return false;
     }
 
-    int status = esp_http_client_get_status_code(client);
-    int64_t cl = esp_http_client_get_content_length(client);
-    ESP_LOGI(TAG_UL, "HTTP %d, content length=%lld", status, (long long)cl);
+    esp_http_client_set_header(cli, "Content-Type", "application/json");
+    esp_http_client_set_post_field(cli, body, blen);
 
-    // Date header
-    char *date_hdr = NULL;
-    if (esp_http_client_get_header(client, "Date", &date_hdr) == ESP_OK && date_hdr) {
-        format_local_datetime_from_date_header(date_hdr, -6, out_date, date_len, out_time, time_len);
-    }
+    esp_err_t err = esp_http_client_perform(cli);
+    int status = esp_http_client_get_status_code(cli);
+    int64_t clen = esp_http_client_get_content_length(cli);
 
-    // Read body
-    char *body = NULL;
-    int buf_sz = (cl > 0 && cl < 8192) ? (int)cl + 1 : 4096;
-    body = (char *)calloc(1, buf_sz);
-    if (!body) {
-        esp_http_client_cleanup(client);
+    ESP_LOGI(TAG, "HTTP %d, content length=%lld", status, (long long)clen);
+    ESP_LOGI(TAG, "Body: %.*s", (int)rb.len, resp);
+
+    esp_http_client_cleanup(cli);
+
+    if (err != ESP_OK || status != 200 || rb.len == 0) {
+        ESP_LOGW(TAG, "Fallo HTTP o respuesta vacía (err=%s, status=%d, len=%u)",
+                 esp_err_to_name(err), status, (unsigned)rb.len);
         return false;
     }
-    int r = esp_http_client_read_response(client, body, buf_sz - 1);
-    if (r < 0) {
-        ESP_LOGE(TAG_UL, "read_response error");
-        free(body);
-        esp_http_client_cleanup(client);
-        return false;
-    }
-    body[r] = 0;
-    ESP_LOGI(TAG_UL, "Body: %.*s", r, body);
 
-    // Parse JSON
-    bool ok = false;
-    cJSON *root = cJSON_ParseWithLength(body, r);
-    if (root) {
-        cJSON *addr = cJSON_GetObjectItemCaseSensitive(root, "address_detail");
-        if (cJSON_IsObject(addr)) {
-            cJSON *city = cJSON_GetObjectItemCaseSensitive(addr, "city");
-            cJSON *state = cJSON_GetObjectItemCaseSensitive(addr, "state");
-            if (cJSON_IsString(city) && cJSON_IsString(state)) {
-                if (out_city && city_len) strlcpy(out_city, city->valuestring, city_len);
-                if (out_state && state_len) strlcpy(out_state, state->valuestring, state_len);
-                ok = true;
-            }
+    char api_status[16] = "";
+    if (json_get_string(resp, "status", api_status, sizeof(api_status))) {
+        if (strcmp(api_status, "ok") != 0 && strcmp(api_status, "OK") != 0) {
+            ESP_LOGW(TAG, "API status='%s'", api_status);
+            return false;
         }
-        cJSON_Delete(root);
     }
 
-    free(body);
-    esp_http_client_cleanup(client);
+    const char *addr = strstr(resp, "\"address\":");
+    const char *start = addr ? strchr(addr, '{') : NULL;
+    const char *end   = start ? strchr(start, '}') : NULL;
+
+    if (start && end && end > start) {
+        char tmp[512] = {0};
+        size_t n = (size_t)(end - start + 1);
+        if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+        memcpy(tmp, start, n);
+        tmp[n] = 0;
+
+        (void)json_get_string(tmp, "city",  city,  city_len);
+        (void)json_get_string(tmp, "state", state, state_len);
+    } else {
+        (void)json_get_string(resp, "city",  city,  city_len);
+        (void)json_get_string(resp, "state", state, state_len);
+    }
+
+    (void)json_get_string(resp, "date", date, date_len);
+    (void)json_get_string(resp, "time", time, time_len);
+
+    bool ok = (city && city[0]) || (state && state[0]);
+    if (!ok) ESP_LOGW(TAG, "Sin address.city/state en respuesta");
     return ok;
 }
-
-
-
-
-
-
-
-

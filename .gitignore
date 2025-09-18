@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+managed_components/
 *.bin
 *.elf
 *.map

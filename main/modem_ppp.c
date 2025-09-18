@@ -7,7 +7,10 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_ppp.h"
+#include "lwip/inet.h"     // <- declara ipaddr_addr
+#include <inttypes.h>      // <- por tu uso de PRIu32 en el LOG
 #include "esp_modem_api.h"
+
 
 static const char *TAG = "modem_ppp";
 static EventGroupHandle_t s_ppp_eg;
@@ -61,10 +64,11 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
 
     // Requiere que esp_netif_init() y esp_event_loop_create_default() estén ya llamados por la app
     esp_netif_config_t nc = ESP_NETIF_DEFAULT_PPP();
+
     esp_netif_t *ppp = esp_netif_new(&nc);
-    // Hacer PPP la interfaz por defecto (ruta y DNS preferidos)
-    esp_netif_set_default_netif(ppp);
     if (!ppp) return ESP_FAIL;
+    // Hacer PPP la interfaz por defecto
+    esp_netif_set_default_netif(ppp);
 
     if (!s_ppp_eg) s_ppp_eg = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &on_ip_event, NULL));

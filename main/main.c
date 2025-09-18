@@ -18,7 +18,12 @@
 #include "firebase.h"
 #include "Privado.h"
 
+// PPP
+#include "modem_ppp.h"
+#include "esp_modem_api.h"
+
 static const char *TAG_APP = "app";
+static esp_modem_dce_t *g_dce = NULL;
 
 static void init_sntp_and_time(void) {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
@@ -193,10 +198,24 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_LOGI(TAG_APP, "PPP modem support removed; skipping cellular setup.");
-    ESP_LOGI(TAG_APP, "Ensure alternative connectivity is available before network operations.");
-
-    // Optionally keep SNTP if another network transport is available.
+    // === 1) Arranca PPP primero (misma config que Arduino) ===
+    modem_ppp_config_t cfg = {
+        .tx_io = 26, .rx_io = 27,
+        .rts_io = -1, .cts_io = -1,     // sin flow control (igual que tu sketch)
+        .dtr_io = 25,
+        .rst_io = 5, .pwrkey_io = 4, .board_power_io = 12,
+        .rst_active_low = true, .rst_pulse_ms = 200,
+        .apn = "internet.itelcel.com",
+        .sim_pin = "",
+        .use_cmux = true                // igual que PPP.mode(ESP_MODEM_MODE_CMUX)
+    };
+    esp_err_t mret = modem_ppp_start_blocking(&cfg, 120000 /* 120s timeout */, &g_dce);
+    if (mret != ESP_OK) {
+        ESP_LOGE(TAG_APP, "No se pudo levantar PPP (%s). Reiniciando...", esp_err_to_name(mret));
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        esp_restart();
+    }
+    // SNTP ya con Internet activo (PPP) ===
     init_sntp_and_time();
 
     // Init sensors

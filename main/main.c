@@ -23,11 +23,12 @@
 
 static const char *TAG_APP = "app";
 static esp_modem_dce_t *g_dce = NULL;
+static inline int64_t minutes_to_us(int m) { return (int64_t)m * 60 * 1000000; }
 
 // ---- Ciudad global para el JSON ----
 static char g_city[64]  = "----";
-static bool g_city_sent = false;   // <-- NUEVO: solo mandar "ciudad" la primera vez
 
+#define LOG_EACH_SAMPLE 1
 #ifndef UNWIREDLABS_TOKEN
 #define UNWIREDLABS_TOKEN "" // define en Privado.h
 #endif
@@ -71,15 +72,14 @@ static void sensor_task(void *pv) {
     SensorData data;
 
     // Hora de arranque (inicio)
-    time_t now_epoch;
-    struct tm tm_info;
-    time(&now_epoch);
-    localtime_r(&now_epoch, &tm_info);
-    char inicio_str[16];
-    strftime(inicio_str, sizeof(inicio_str), "%H:%M:%S", &tm_info);
+    time_t start_epoch;
+    struct tm start_tm_info;
+    char inicio_str[20];
+    time(&start_epoch);
+    localtime_r(&start_epoch, &start_tm_info);
+    strftime(inicio_str, sizeof(inicio_str), "%H:%M:%S", &start_tm_info);
 
-    const uint32_t TOKEN_REFRESH_INTERVAL_SEC = 50 * 60; // 50 minutos
-    time_t last_token_refresh = time(NULL);
+    bool first_send = true;
 
     if (firebase_init() != 0) {
         ESP_LOGE(TAG_APP, "Error inicializando Firebase");
@@ -97,6 +97,10 @@ static void sensor_task(void *pv) {
 
     double sum_pm1p0=0, sum_pm2p5=0, sum_pm4p0=0, sum_pm10p0=0, sum_voc=0, sum_nox=0, sum_avg_temp=0, sum_avg_hum=0;
     uint32_t sum_co2 = 0;
+    char last_fecha_str[20] = "";
+
+    const int64_t REFRESH_US = minutes_to_us(50);
+    int64_t next_refresh_us = esp_timer_get_time() + REFRESH_US;
 
     while (1) {
         if (sensors_read(&data) == ESP_OK) {
@@ -110,40 +114,17 @@ static void sensor_task(void *pv) {
             sum_avg_temp += data.avg_temp;
             sum_avg_hum += data.avg_hum;
             sum_co2 += data.co2;
+#if LOG_EACH_SAMPLE
             ESP_LOGI(TAG_APP,
                 "Muestra %d/%d: PM1.0=%.2f PM2.5=%.2f PM4.0=%.2f PM10=%.2f VOC=%.1f NOx=%.1f CO2=%u Temp=%.2fC Hum=%.2f%%",
                 sample_count, SAMPLES_PER_BATCH, data.pm1p0, data.pm2p5, data.pm4p0, data.pm10p0,
                 data.voc, data.nox, data.co2, data.avg_temp, data.avg_hum);
+#endif
         } else {
             ESP_LOGW(TAG_APP, "Error leyendo sensores (batch %d)", sample_count);
         }
 
-        // Refresh del token cada 50 min aprox
-        time_t now_epoch_check = time(NULL);
-        if ((now_epoch_check - last_token_refresh) >= TOKEN_REFRESH_INTERVAL_SEC) {
-            ESP_LOGI(TAG_APP, "Refrescando token (50m)...");
-            int r = firebase_refresh_token();
-            if (r == 0) ESP_LOGI(TAG_APP, "Token refresh OK"); else ESP_LOGW(TAG_APP, "Fallo refresh token (%d)", r);
-            last_token_refresh = now_epoch_check;
-        }
-
         if (sample_count >= SAMPLES_PER_BATCH) {
-            // Promedio del batch
-            SensorData avg = {0};
-            avg.pm1p0 = sum_pm1p0 / sample_count;
-            avg.pm2p5 = sum_pm2p5 / sample_count;
-            avg.pm4p0 = sum_pm4p0 / sample_count;
-            avg.pm10p0 = sum_pm10p0 / sample_count;
-            avg.voc = sum_voc / sample_count;
-            avg.nox = sum_nox / sample_count;
-            avg.avg_temp = sum_avg_temp / sample_count;
-            avg.avg_hum = sum_avg_hum / sample_count;
-            avg.co2 = (uint16_t)(sum_co2 / sample_count);
-            avg.scd_temp = avg.avg_temp;
-            avg.scd_hum = avg.avg_hum;
-            avg.sen_temp = avg.avg_temp;
-            avg.sen_hum = avg.avg_hum;
-
             time_t now_epoch;
             struct tm tm_info;
             time(&now_epoch);
@@ -151,32 +132,55 @@ static void sensor_task(void *pv) {
             char hora_envio[16];
             strftime(hora_envio, sizeof(hora_envio), "%H:%M:%S", &tm_info);
             char fecha_actual[20];
+            // Formato actualizado a DD-MM-YYYY
             strftime(fecha_actual, sizeof(fecha_actual), "%d-%m-%Y", &tm_info);
 
-            char json[512];
+            SensorData avg = {0};
+            double denom = (double)sample_count;
+            avg.pm1p0 = (float)(sum_pm1p0 / denom);
+            avg.pm2p5 = (float)(sum_pm2p5 / denom);
+            avg.pm4p0 = (float)(sum_pm4p0 / denom);
+            avg.pm10p0 = (float)(sum_pm10p0 / denom);
+            avg.voc = (float)(sum_voc / denom);
+            avg.nox = (float)(sum_nox / denom);
+            avg.avg_temp = (float)(sum_avg_temp / denom);
+            avg.avg_hum  = (float)(sum_avg_hum / denom);
+            avg.co2 = (uint16_t)(sum_co2 / sample_count);
+            avg.scd_temp = avg.avg_temp;
+            avg.scd_hum = avg.avg_hum;
+            avg.sen_temp = avg.avg_temp;
+            avg.sen_hum = avg.avg_hum;
 
-            if (!g_city_sent) {
-                // Primera vez: incluye "ciudad" (sin comas) y márcala como enviada
-                snprintf(json, sizeof(json),
-                    "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,"
-                     "\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,"
-                     "\"fecha\":\"%s\",\"inicio\":\"%s\",\"ciudad\":\"%s\",\"hora\":\"%s\",\"id\":\"%s\"}",
-                    avg.pm1p0, avg.pm2p5, avg.pm4p0, avg.pm10p0,
-                    avg.voc, avg.nox, avg.avg_temp, avg.avg_hum,
-                    avg.co2, fecha_actual, inicio_str, g_city, hora_envio, DEVICE_ID);
-                g_city_sent = true;  // <-- a partir de aquí ya no se manda "ciudad"
+            char json[384];
+            if (first_send) {
+                sensors_format_json(&avg, hora_envio, fecha_actual, inicio_str, json, sizeof(json));
+                strncpy(last_fecha_str, fecha_actual, sizeof(last_fecha_str)-1);
+                last_fecha_str[sizeof(last_fecha_str)-1] = '\0';
+                first_send = false;
             } else {
-                // Envíos subsecuentes: SIN "ciudad"
-                snprintf(json, sizeof(json),
-                    "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,"
-                     "\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,"
-                     "\"fecha\":\"%s\",\"inicio\":\"%s\",\"hora\":\"%s\",\"id\":\"%s\"}",
-                    avg.pm1p0, avg.pm2p5, avg.pm4p0, avg.pm10p0,
-                    avg.voc, avg.nox, avg.avg_temp, avg.avg_hum,
-                    avg.co2, fecha_actual, inicio_str, hora_envio, DEVICE_ID);
+                if (strncmp(last_fecha_str, fecha_actual, sizeof(last_fecha_str)) != 0) {
+                    snprintf(json, sizeof(json),
+                        "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,"
+                        "\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,"
+                        "\"fecha\":\"%s\",\"hora\":\"%s\"}",
+                        avg.pm1p0, avg.pm2p5, avg.pm4p0, avg.pm10p0,
+                        avg.voc, avg.nox, avg.avg_temp, avg.avg_hum,
+                        avg.co2, fecha_actual, hora_envio);
+                    strncpy(last_fecha_str, fecha_actual, sizeof(last_fecha_str)-1);
+                    last_fecha_str[sizeof(last_fecha_str)-1] = '\0';
+                } else {
+                    snprintf(json, sizeof(json),
+                        "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,"
+                        "\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,"
+                        "\"hora\":\"%s\"}",
+                        avg.pm1p0, avg.pm2p5, avg.pm4p0, avg.pm10p0,
+                        avg.voc, avg.nox, avg.avg_temp, avg.avg_hum,
+                        avg.co2, hora_envio);
+                }
             }
-
-            ESP_LOGI(TAG_APP, "JSON promedio %dm: %s", SAMPLES_PER_BATCH * SAMPLE_EVERY_MIN, json);
+            // Log dinámico indicando cada cuántos minutos se está enviando
+            int batch_minutes = SAMPLES_PER_BATCH * SAMPLE_EVERY_MIN;
+            ESP_LOGI(TAG_APP, "JSON promedio %dm: %s", batch_minutes, json);
             firebase_push("/historial_mediciones", json);
 
             // Retención aproximada por tamaño total (~10 MB)
@@ -201,6 +205,16 @@ static void sensor_task(void *pv) {
             sample_count = 0;
             sum_pm1p0=sum_pm2p5=sum_pm4p0=sum_pm10p0=sum_voc=sum_nox=sum_avg_temp=sum_avg_hum=0;
             sum_co2 = 0;
+        }
+
+        // Refresh del token cada ~50 min (no le afecta SNTP):
+        int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_refresh_us) {
+            ESP_LOGI(TAG_APP, "Refrescando token (50m) [monotónico]...");
+            int r = firebase_refresh_token();
+            if (r == 0) ESP_LOGI(TAG_APP, "Token refresh OK"); else ESP_LOGW(TAG_APP, "Fallo refresh token (%d)", r);
+            // agenda el próximo exactamente 50 min después DEL AHORA (evita drift):
+            next_refresh_us = now_us + REFRESH_US;
         }
 
         vTaskDelay(SAMPLE_DELAY_TICKS);

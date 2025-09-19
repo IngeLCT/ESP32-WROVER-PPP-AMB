@@ -420,7 +420,9 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
 
     /* Crea PPP netif y registra eventos */
     esp_netif_config_t nc = ESP_NETIF_DEFAULT_PPP();
+
     esp_netif_t *ppp = esp_netif_new(&nc);
+
     if (!ppp) return ESP_FAIL;
     s_ppp_netif = ppp;  // guarda para bind
     esp_netif_set_default_netif(ppp);
@@ -496,12 +498,12 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
     ESP_ERROR_CHECK(mode_err);
 
     ESP_LOGI(TAG, "Esperando IP PPP (%d ms)…", timeout_ms);
-    EventBits_t b = xEventGroupWaitBits(s_ppp_eg, PPP_UP_BIT, pdFALSE, pdTRUE,
-                                        timeout_ms > 0 ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY);
-    if (!(b & PPP_UP_BIT)) {
-        ESP_LOGE(TAG, "Timeout esperando IP PPP");
-        return ESP_ERR_TIMEOUT;
-    }
+     EventBits_t b = xEventGroupWaitBits(s_ppp_eg, PPP_UP_BIT, pdFALSE, pdTRUE,
+                                         timeout_ms > 0 ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY);
+     if (!(b & PPP_UP_BIT)) {
+         ESP_LOGE(TAG, "Timeout esperando IP PPP");
+         return ESP_ERR_TIMEOUT;
+     }
 
     /* DNS fallback si viene vacío */
     esp_netif_dns_info_t dmain = {0}, dbackup = {0};

@@ -1,9 +1,7 @@
 #include "modem_ppp.h"
 
-#include <string.h>
-#include <ctype.h>
-#include <stdlib.h>
-#include <inttypes.h>
+#include <string.h>         // memcpy
+#include <inttypes.h>       // PRIu32
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -12,9 +10,8 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_ppp.h"
-#include "lwip/inet.h"
+#include "lwip/inet.h"      // ipaddr_addr
 #include "esp_modem_api.h"
-#include "unwiredlabs.h"
 
 static const char *TAG = "modem_ppp";
 static EventGroupHandle_t s_ppp_eg;
@@ -30,10 +27,10 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
     }
 }
 
-/* Secuencia de encendido típica para SIM7600/A76xx
- *  - Evita pulsar RST al arranque
- *  - PWRKEY activo LOW ~1.2 s para encender
- *  - Espera 3 s a que suba el módem
+/* Encendido estable para A7670/SIM7600:
+ * - No pulses RST al arranque; déjalo inactivo
+ * - PWRKEY activo LOW ~1.2 s para encender
+ * - Espera 3 s a que el módem suba
  */
 static void hw_boot(const modem_ppp_config_t *c) {
     if (c->board_power_io >= 0) {               // habilita rail 4G
@@ -60,128 +57,52 @@ static void hw_boot(const modem_ppp_config_t *c) {
         gpio_set_level(c->pwrkey_io, 1);
     }
 
-    // Espera a que arranque el módem (banner + "Call Ready")
+    // Espera a que arranque el módem (banner + “Call Ready”)
     vTaskDelay(pdMS_TO_TICKS(3000));
 }
 
-/* ------------------- Parsers de respuestas AT ------------------- */
-// +CPSI: LTE,Online,334-020,...,<TAC>,<CID>,...
-static bool parse_cpsi_line(const char *line, int *mcc, int *mnc, int *tac, int *cid) {
-    if (!line || !strstr(line, "+CPSI")) return false;
-
-    // Extrae MCC-MNC (formato "334-020")
-    const char *dash = strstr(line, "-");
-    if (!dash) return false;
-
-    const char *p = dash;
-    while (p > line && isdigit((unsigned char)p[-1])) p--;
-
-    char mccs[4] = {0}, mncs[4] = {0};
-    int n1 = (int)(dash - p);
-    if (n1 < 2 || n1 > 3) return false;
-    strncpy(mccs, p, n1);
-
-    const char *r = dash + 1;
-    int n2 = 0;
-    while (isdigit((unsigned char)r[n2]) && n2 < 3) n2++;
-    if (n2 < 2 || n2 > 3) return false;
-    strncpy(mncs, r, n2);
-
-    int _mcc = atoi(mccs);
-    int _mnc = atoi(mncs);
-
-    // Busca los dos siguientes números grandes como TAC y CID (acepta dec o 0xHEX)
-    int got = 0;
-    long vals[2] = {0, 0};
-    for (const char *s = r + n2; *s && got < 2; ++s) {
-        if (*s == '0' && (s[1] == 'x' || s[1] == 'X')) {
-            char *endptr;
-            long v = strtol(s, &endptr, 16);
-            if (endptr != s) {
-                vals[got++] = v;
-                s = endptr - 1;
-            }
-        } else if (isdigit((unsigned char)*s)) {
-            char *endptr;
-            long v = strtol(s, &endptr, 10);
-            vals[got++] = v;
-            s = endptr - 1;
-        }
+/* Pequeño acumulador para respuestas AT (por si quieres loguearlas) */
+typedef struct { char *buf; size_t size; size_t used; } at_acc_t;
+static at_acc_t s_acc;
+static esp_err_t at_acc_cb(uint8_t *data, size_t len) {
+    size_t n = (len < (s_acc.size - s_acc.used - 1)) ? len : (s_acc.size - s_acc.used - 1);
+    if (n > 0 && s_acc.buf) {
+        memcpy(s_acc.buf + s_acc.used, data, n);
+        s_acc.used += n;
+        s_acc.buf[s_acc.used] = '\0';
     }
-    if (got < 2) return false;
-
-    if (mcc) { *mcc = _mcc; }
-    if (mnc) { *mnc = _mnc; }
-    if (tac) { *tac = (int)vals[0]; }
-    if (cid) { *cid = (int)vals[1]; }
-
-    return true;
+    return ESP_OK;
 }
 
-// +COPS?: +COPS: 0,2,"334020",7  (tras AT+COPS=3,2)
-static bool parse_cops_numeric(const char *line, int *mcc, int *mnc) {
-    if (!line) return false;
-    const char *q = strchr(line, '"'); if (!q) return false;
-    const char *q2 = strchr(q+1, '"'); if (!q2 || q2-q-1 < 5) return false;
-    char op[8]={0}; strncpy(op, q+1, q2-q-1);
-    char mccs[4]={0}, mncs[4]={0};
-    strncpy(mccs, op, 3);
-    strncpy(mncs, op+3, (int)strlen(op)-3);
-    if (mcc) *mcc = atoi(mccs);
-    if (mnc) *mnc = atoi(mncs);
-    return true;
-}
-
-// +CEREG?: +CEREG: n,stat,"TAC","CI",...
-static bool parse_cereg_line(const char *line, int *tac, int *cid) {
-    if (!line) return false;
-    const char *q=strchr(line,'"'); if(!q) return false;
-    const char *q2=strchr(q+1,'"'); if(!q2) return false;
-    const char *q3=strchr(q2+1,'"'); if(!q3) return false;
-    const char *q4=strchr(q3+1,'"'); if(!q4) return false;
-    char tac_hex[8]={0}, ci_hex[16]={0};
-    strncpy(tac_hex, q+1,  q2-q-1);
-    strncpy(ci_hex,  q3+1, q4-q3-1);
-    if (tac) *tac = (int)strtol(tac_hex, NULL, 16);
-    if (cid) *cid = (int)strtol(ci_hex,  NULL, 16);
-    return true;
-}
-
-/* ------------------- Helper de comando AT (C-API) ------------------- */
-static bool at_cmd(esp_modem_dce_t *dce, const char *cmd, char *out, size_t outlen, uint32_t to_ms)
-{
-    if (!out || outlen < CONFIG_ESP_MODEM_C_API_STR_MAX) return false;
-    memset(out, 0, outlen);
-    command_result r = esp_modem_at(dce, cmd, out, (int)to_ms); // esp_modem_at agrega el CR
-    return (r == OK);
-}
-
-/* ------------------- Arranque PPP bloqueante ------------------- */
-esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg, int timeout_ms, esp_modem_dce_t **out_dce)
+esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
+                                   int timeout_ms,
+                                   esp_modem_dce_t **out_dce)
 {
     if (!cfg || !cfg->apn) return ESP_ERR_INVALID_ARG;
 
+    // Requiere: esp_netif_init() y esp_event_loop_create_default() ya llamados por la app
     esp_netif_config_t nc = ESP_NETIF_DEFAULT_PPP();
     esp_netif_t *ppp = esp_netif_new(&nc);
     if (!ppp) return ESP_FAIL;
+
+    // Hacer PPP la interfaz por defecto (ruta y DNS preferidos)
     esp_netif_set_default_netif(ppp);
 
     if (!s_ppp_eg) s_ppp_eg = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &on_ip_event, NULL));
 
+    // Encendido HW del módem (alineado a A7670/SIM7600)
     hw_boot(cfg);
 
     // DTE (UART del módem)
     esp_modem_dte_config_t dte_cfg = ESP_MODEM_DTE_DEFAULT_CONFIG();
     dte_cfg.uart_config.port_num   = UART_NUM_1;
-    dte_cfg.uart_config.baud_rate  = 115200;   // ajusta si tu módem quedó en otro baud
+    dte_cfg.uart_config.baud_rate  = 115200;     // explícito (ajusta si tu módem quedó en otro baud)
     dte_cfg.uart_config.tx_io_num  = cfg->tx_io;
     dte_cfg.uart_config.rx_io_num  = cfg->rx_io;
     dte_cfg.uart_config.rts_io_num = cfg->rts_io;
     dte_cfg.uart_config.cts_io_num = cfg->cts_io;
-    dte_cfg.uart_config.flow_control = (cfg->rts_io >= 0 && cfg->cts_io >= 0)
-                                        ? ESP_MODEM_FLOW_CONTROL_HW
-                                        : ESP_MODEM_FLOW_CONTROL_NONE;
+    dte_cfg.uart_config.flow_control = ESP_MODEM_FLOW_CONTROL_NONE; // sin RTS/CTS por ahora
 
     // DCE SIM7600 (A7670 compatible)
     esp_modem_dce_config_t dce_cfg = ESP_MODEM_DCE_DEFAULT_CONFIG(cfg->apn);
@@ -189,38 +110,24 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg, int timeout_ms
     if (!dce) return ESP_FAIL;
     if (out_dce) *out_dce = dce;
 
+    // APN explícito
     ESP_ERROR_CHECK(esp_modem_set_apn(dce, cfg->apn));
 
-    // Modo COMANDO para sincronizar con AT
+    // Entra a COMMAND antes del handshake
     ESP_ERROR_CHECK( esp_modem_set_mode(dce, ESP_MODEM_MODE_COMMAND) );
 
-    ESP_LOGI(TAG, "Sincronizando AT…");
-    command_result sr = esp_modem_sync(dce);
-    if (sr != OK) {
-        ESP_LOGW(TAG, "sync inicial falló, desactivando eco y reintentando…");
-        (void)esp_modem_set_echo(dce, false);
-        for (int i = 0; i < 3 && sr != OK; ++i) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-            sr = esp_modem_sync(dce);
-        }
+    // Handshake AT (equivalente a "esp_modem_sync()") usando la C-API segura
+    char at_rsp[64] = {0};
+    s_acc = (at_acc_t){ .buf = at_rsp, .size = sizeof(at_rsp), .used = 0 };
+    esp_err_t at_ok = esp_modem_command(dce, "AT\r", at_acc_cb, 1000);
+    if (at_ok != ESP_OK) {
+        ESP_LOGE(TAG, "El módem no responde a AT. rsp='%s' (verifica PWRKEY/baud/TX-RX/GND)", at_rsp);
+        return at_ok;
     }
-    if (sr != OK) {
-        ESP_LOGE(TAG, "El módem no responde a AT. Verifica PWRKEY/baud/wiring.");
-        return ESP_ERR_TIMEOUT;
-    }
+    (void)esp_modem_command(dce, "ATE0\r", at_acc_cb, 1000);  // eco off
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Eco off por si acaso
-    (void)esp_modem_set_echo(dce, false);
-
-    // Consulta básica de red (opcional)
-    char buf[512];
-    (void)at_cmd(dce, "AT",           buf, sizeof(buf), 2000);
-    (void)at_cmd(dce, "AT+CPSI?",     buf, sizeof(buf), 5000);
-    (void)at_cmd(dce, "AT+COPS=3,2",  buf, sizeof(buf), 2000);
-    (void)at_cmd(dce, "AT+COPS?",     buf, sizeof(buf), 3000);
-    (void)at_cmd(dce, "AT+CEREG?",    buf, sizeof(buf), 3000);
-
-    // Pasa a DATA (PPP). Con fallback si venía CMUX
+    // Ahora sí: a DATA (PPP). Si CMUX estaba pedido y falla, cae a DATA.
     esp_err_t mode_err = esp_modem_set_mode(dce, cfg->use_cmux ? ESP_MODEM_MODE_CMUX
                                                                : ESP_MODEM_MODE_DATA);
     if (mode_err != ESP_OK && cfg->use_cmux) {
@@ -237,7 +144,7 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg, int timeout_ms
         return ESP_ERR_TIMEOUT;
     }
 
-    // DNS fallback si el APN no entregó
+    // Verificar DNS y forzar si viene vacío
     esp_netif_dns_info_t dmain = {0}, dbackup = {0};
     esp_netif_get_dns_info(ppp, ESP_NETIF_DNS_MAIN, &dmain);
     esp_netif_get_dns_info(ppp, ESP_NETIF_DNS_BACKUP, &dbackup);
@@ -257,56 +164,4 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg, int timeout_ms
     }
 
     return ESP_OK;
-}
-
-/* ------------------- Obtener celda y geolocalizar ------------------- */
-bool modem_get_cell_info(esp_modem_dce_t *dce, int *mcc, int *mnc, int *tac, int *cid) {
-    if (!dce) return false;
-    char buf[1024];
-
-    // Pausa tráfico PPP para hablar AT sin pelearnos con DATA
-    esp_modem_pause_net(dce, true);
-
-    // 1) Intento con CPSI
-    if (at_cmd(dce, "AT+CPSI?", buf, sizeof(buf), 5000)) {
-        const char *line = strstr(buf, "+CPSI:");
-        if (line && parse_cpsi_line(line, mcc, mnc, tac, cid)) {
-            esp_modem_pause_net(dce, false);
-            ESP_LOGI(TAG, "CPSI: MCC=%d MNC=%d TAC=%d CID=%d", mcc?*mcc:-1, mnc?*mnc:-1, tac?*tac:-1, cid?*cid:-1);
-            return true;
-        }
-    }
-
-    // 2) Respaldo: COPS numeric (MCC/MNC)
-    (void)at_cmd(dce, "AT+COPS=3,2", buf, sizeof(buf), 2000);
-    if (at_cmd(dce, "AT+COPS?", buf, sizeof(buf), 3000)) {
-        const char *line = strstr(buf, "+COPS:");
-        if (line) parse_cops_numeric(line, mcc, mnc);
-    }
-
-    // 3) Respaldo: CEREG? (TAC/CID en hex)
-    if (at_cmd(dce, "AT+CEREG?", buf, sizeof(buf), 3000)) {
-        const char *line = strstr(buf, "+CEREG:");
-        if (line) parse_cereg_line(line, tac, cid);
-    }
-
-    esp_modem_pause_net(dce, false);
-    bool ok = (mcc && mnc && tac && cid && *mcc>0 && *mnc>=0 && *tac>0 && *cid>0);
-    if (!ok) ESP_LOGW(TAG, "Cell info incompleta: mcc=%d mnc=%d tac=%d cid=%d",
-                      mcc?*mcc:-1, mnc?*mnc:-1, tac?*tac:-1, cid?*cid:-1);
-    return ok;
-}
-
-bool modem_geolocate_from_cell(esp_modem_dce_t *dce, const char *token,
-                               char *city, size_t city_len,
-                               char *state, size_t state_len,
-                               char *date, size_t date_len,
-                               char *time, size_t time_len)
-{
-    int mcc=0,mnc=0,tac=0,cid=0;
-    if (!modem_get_cell_info(dce, &mcc, &mnc, &tac, &cid)) return false;
-    bool r = unwiredlabs_geolocate(token, mcc, mnc, tac, cid,
-                                   city, city_len, state, state_len, date, date_len, time, time_len);
-    if (r) ESP_LOGI(TAG, "Geo (UL): %s, %s (%s %s)", city, state, date, time);
-    return r;
 }

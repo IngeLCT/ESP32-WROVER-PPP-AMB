@@ -33,7 +33,7 @@ static char g_city[64]  = "----";
 #define UNWIREDLABS_TOKEN "" // define en Privado.h
 #endif
 #ifndef DEVICE_ID
-#define DEVICE_ID "ESP32-WROVER-PPP"
+#define DEVICE_ID "5585782271"
 #endif
 
 static void init_sntp_and_time(void) {
@@ -261,13 +261,16 @@ void app_main(void)
         if (modem_unwiredlabs_city_state(city, sizeof(city), state, sizeof(state)) == ESP_OK) {
             build_city_hyphen(g_city, sizeof(g_city), city, state); // "Ciudad-Estado" sin comas
             ESP_LOGI(TAG_APP, "Ciudad para JSON (1a vez): %s", g_city);
+            sensors_set_city_state(g_city);
         } else {
             ESP_LOGW(TAG_APP, "No se pudo geolocalizar por celda. Ciudad='----'");
             strncpy(g_city, "----", sizeof(g_city));
             g_city[sizeof(g_city)-1] = '\0';
+            sensors_set_city_state(g_city);
         }
     } else {
             ESP_LOGW(TAG_APP, "UNWIREDLABS_TOKEN vacío. Ciudad quedará '----'");
+            sensors_set_city_state("----");
     }
 
     // === 4) Sensores y task de envío a Firebase ===

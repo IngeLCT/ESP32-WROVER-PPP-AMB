@@ -54,7 +54,8 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
         ESP_LOGI(TAG, "PPP UP  ip=" IPSTR " gw=" IPSTR, IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.gw));
         xEventGroupSetBits(s_ppp_eg, PPP_UP_BIT);
     } else if (id == IP_EVENT_PPP_LOST_IP) {
-        ESP_LOGW(TAG, "PPP DOWN");
+        ESP_LOGW(TAG, "Fallo PPP reiniciando esp...");
+        esp_restart();
     }
 }
 
@@ -349,11 +350,11 @@ esp_err_t modem_unwiredlabs_city_state(char *city, size_t city_len,
         esp_http_client_config_t cfg = {
             .url = UNWIRED_URL,                     // igual que tu ejemplo Geoapify
             .crt_bundle_attach = esp_crt_bundle_attach,
-            .timeout_ms = 15000,
+            .timeout_ms = 20000,
             .event_handler = ul_http_evt,
             .user_data = &acc,
-            .buffer_size = 1024,
-            .buffer_size_tx = 512,
+            .buffer_size = 2048,
+            .buffer_size_tx = 1024,
             .method = HTTP_METHOD_POST,
             .if_name = s_ppp_netif ? &ifr : NULL  // <<--- liga a PPP
         };
@@ -361,7 +362,7 @@ esp_err_t modem_unwiredlabs_city_state(char *city, size_t city_len,
         esp_http_client_handle_t cli = esp_http_client_init(&cfg);
         if (!cli) {
             ESP_LOGW(TAG, "no client");
-            vTaskDelay(pdMS_TO_TICKS(300 * attempt));
+            vTaskDelay(pdMS_TO_TICKS(1000 * attempt));
             continue;
         }
 
@@ -404,7 +405,7 @@ esp_err_t modem_unwiredlabs_city_state(char *city, size_t city_len,
             ESP_LOGW(TAG, "HTTP fallo %s", esp_err_to_name(err));
         }
 
-        vTaskDelay(pdMS_TO_TICKS(300 * attempt)); // backoff suave
+        vTaskDelay(pdMS_TO_TICKS(500 * attempt)); // backoff suave
     }
 
     return last_err ? last_err : ESP_FAIL;

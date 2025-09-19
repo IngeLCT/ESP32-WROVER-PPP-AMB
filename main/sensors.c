@@ -112,6 +112,7 @@ esp_err_t sensors_init_all(void) {
         ESP_LOGD(TAG_SENS, "I2C bus ya inicializado");
         return ESP_OK;
     }
+    vTaskDelay(pdMS_TO_TICKS(1500));
 
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port = I2C_PORT,

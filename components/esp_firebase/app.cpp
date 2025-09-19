@@ -87,7 +87,7 @@ void FirebaseApp::firebaseClientInit(void)
     config.buffer_size_tx = 4096;
     config.buffer_size = HTTP_RECV_BUFFER_SIZE;
     // Timeout razonable (ms)
-    config.timeout_ms = 15000; // 15s
+    config.timeout_ms = 20000; // 15s
     // Deshabilitamos keep-alive: el server parece cerrar tras inactividad (~10 min) provocando RST en primer write
     config.keep_alive_enable = false;
     FirebaseApp::client = esp_http_client_init(&config);

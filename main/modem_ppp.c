@@ -11,16 +11,28 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_ppp.h"
+#include "esp_heap_caps.h" 
 #include "lwip/inet.h"      // ipaddr_addr
 #include "esp_modem_api.h"
 
 /* ==== HTTP (UnwiredLabs) ==== */
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_timer.h"
 #include "Privado.h"  // define UNWIREDLABS_TOKEN
 
 #ifndef UNWIREDLABS_TOKEN
 # define UNWIREDLABS_TOKEN ""
+#endif
+
+#ifndef UNWIRED_HOST
+#define UNWIRED_HOST  "us1.unwiredlabs.com"   // cambia a eu1.* si tu cuenta es EU
+#endif
+#ifndef UNWIRED_PATH
+#define UNWIRED_PATH  "/v2/process.php"
+#endif
+#ifndef UNWIRED_PORT
+#define UNWIRED_PORT  443
 #endif
 
 #ifndef UNWIRED_URL
@@ -293,20 +305,28 @@ esp_err_t modem_unwiredlabs_city_state(char *city, size_t city_len,
     }
 
     char resp[2048] = {0};
-    resp_buf_t rb = { .buf = resp, .cap = sizeof(resp), .len = 0 };
+    resp_buf_t rb = { .buf = heap_caps_malloc(4096, MALLOC_CAP_DEFAULT),
+                  .cap = 4096, .len = 0 };
+    if (!rb.buf) return ESP_ERR_NO_MEM;
+
+    heap_caps_check_integrity_all(true);
 
     esp_http_client_config_t cfg = {
-        .url = UNWIRED_URL,
+        .host = UNWIRED_HOST,
+        .path = UNWIRED_PATH,
+        .port = UNWIRED_PORT,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 15000,
         .event_handler = http_evt,
         .user_data = &rb,
         .disable_auto_redirect = false,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
-        .crt_bundle_attach = esp_crt_bundle_attach,  // bundle de CAs de IDF
+        .crt_bundle_attach = esp_crt_bundle_attach,
         .buffer_size = 1024,
         .buffer_size_tx = 512,
     };
+
+    heap_caps_check_integrity_all(true);
 
     esp_http_client_handle_t cli = esp_http_client_init(&cfg);
     if (!cli) {
@@ -323,6 +343,7 @@ esp_err_t modem_unwiredlabs_city_state(char *city, size_t city_len,
     ESP_LOGI(TAG, "UL HTTP %d, len=%lld", status, (long long)clen);
     ESP_LOGI(TAG, "UL Body: %.*s", (int)rb.len, resp);
     esp_http_client_cleanup(cli);
+    
 
     if (err != ESP_OK || status != 200 || rb.len == 0) {
         ESP_LOGW(TAG, "Fallo HTTP o respuesta vacía (err=%s, status=%d, len=%u)",
@@ -360,6 +381,7 @@ esp_err_t modem_unwiredlabs_city_state(char *city, size_t city_len,
 
     if ((city && city[0]) || (state && state[0])) return ESP_OK;
     ESP_LOGW(TAG, "Sin address.city/state en respuesta");
+    free(rb.buf);
     return ESP_FAIL;
 }
 /* =================== /UnwiredLabs (HTTP/S) ===================== */

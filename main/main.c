@@ -26,7 +26,6 @@ static esp_modem_dce_t *g_dce = NULL;
 
 // ---- Ciudad global para el JSON ----
 static char g_city[64]  = "----";
-static char g_state[64] = "";
 static bool g_city_sent = false;   // <-- NUEVO: solo mandar "ciudad" la primera vez
 
 #ifndef UNWIREDLABS_TOKEN

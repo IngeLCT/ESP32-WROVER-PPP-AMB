@@ -1,42 +1,40 @@
 #include "modem_ppp.h"
+
 #include <string.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <ctype.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+
 #include "driver/gpio.h"
+
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_ppp.h"
-#include "esp_heap_caps.h" 
-#include "lwip/inet.h"      // ipaddr_addr
+#include "esp_heap_caps.h"
+#include "lwip/inet.h"              // ipaddr_addr
+#include "lwip/dns.h"          // dns_setserver
+#include "lwip/netdb.h"        // getaddrinfo (si haces pruebas)
 #include "esp_modem_api.h"
 
 /* ==== HTTP (UnwiredLabs) ==== */
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_timer.h"
-#include "Privado.h"  // define UNWIREDLABS_TOKEN
+#include "privado.h"                // define UNWIREDLABS_TOKEN (tu archivo)
+
+/* Endpoint por defecto (cambia a EU si aplica) */
+#ifndef UNWIRED_URL
+#define UNWIRED_URL "https://us1.unwiredlabs.com/v2/process.php"
+#endif
 
 #ifndef UNWIREDLABS_TOKEN
 # define UNWIREDLABS_TOKEN ""
-#endif
-
-#ifndef UNWIRED_HOST
-#define UNWIRED_HOST  "us1.unwiredlabs.com"   // cambia a eu1.* si tu cuenta es EU
-#endif
-#ifndef UNWIRED_PATH
-#define UNWIRED_PATH  "/v2/process.php"
-#endif
-#ifndef UNWIRED_PORT
-#define UNWIRED_PORT  443
-#endif
-
-#ifndef UNWIRED_URL
-# define UNWIRED_URL "https://us1.unwiredlabs.com/v2/process.php"
 #endif
 /* ============================ */
 
@@ -47,7 +45,9 @@ static EventGroupHandle_t s_ppp_eg;
 /* ===== UE info global ===== */
 static modem_ue_info_t s_ue_info;   // última UE info válida (CPSI)
 static bool            s_ue_valid;  // hay UE info válida
+static esp_netif_t *s_ppp_netif = NULL;   // guarda el netif PPP para bind
 
+/* ---------------- PPP / Eventos ---------------- */
 static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (id == IP_EVENT_PPP_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
@@ -132,7 +132,7 @@ static esp_err_t esperar_cereg(esp_modem_dce_t *dce, int timeout_ms, int poll_ms
     return ESP_ERR_TIMEOUT;
 }
 
-/* AT+CPSI? con reintentos/backoff (máx ~9s por manual; damos 12s) */
+/* AT+CPSI? con reintentos/backoff */
 static esp_err_t cpsi_con_reintentos(esp_modem_dce_t *dce,
                                      char *out_final, size_t out_len,
                                      int intentos, int delay_ms)
@@ -181,9 +181,11 @@ static esp_err_t set_mode_if_needed(esp_modem_dce_t *dce, esp_modem_dce_mode_t t
     return esp_modem_set_mode(dce, target);
 }
 
-/* ===== Parser C de +CPSI (LTE): extrae MCC, MNC, TAC, ECI =====
- * Ejemplo real:
- * +CPSI: LTE,Online,334-20,0x232,43790378,55,EUTRAN-BAND5,2560,...
+/* ===== Parser C de +CPSI (LTE/GSM): MCC, MNC, TAC/LAC, ECI/CID =====
+ * LTE ejemplo:
+ *   +CPSI: LTE,Online,334-20,0x232,43790378,55,EUTRAN-BAND5,...
+ * GSM ejemplo:
+ *   +CPSI: GSM,Online,334-20,0x19,31925,733 PCS 1900,...
  *       idx:  0    1     2      3       4
  */
 static char *trim_ws(char *s) {
@@ -217,9 +219,9 @@ static bool parse_cpsi_line(const char *line_in, modem_ue_info_t *out)
             *dash = '\0';
             out->mcc = atoi(trim_ws(tok));
             out->mnc = atoi(trim_ws(dash + 1));
-        } else if (tokenId == 3) { // TAC (hex o dec)
+        } else if (tokenId == 3) { // TAC/LAC (hex o dec)
             out->tac = (uint32_t)strtoul(tok, NULL, 0);
-        } else if (tokenId == 4) { // SCellID (ECI)
+        } else if (tokenId == 4) { // SCellID/CellID (ECI/CID)
             out->cell_id = (uint32_t)strtoul(tok, NULL, 0);
             break; // ya tenemos lo que queremos
         }
@@ -239,27 +241,47 @@ bool modem_get_ue_info(modem_ue_info_t *out)
     return s_ue_valid;
 }
 
-/* ===================== UnwiredLabs (HTTP/S) ===================== */
-typedef struct {
-    char  *buf;
-    size_t cap;
-    size_t len;
-} resp_buf_t;
+static void force_public_dns(void) {
+    // Ajusta ambos: global (LWIP) y por interfaz (esp-netif)
+    ip_addr_t dns;
+    IP_ADDR4(&dns, 1, 1, 1, 1);
+    dns_setserver(0, &dns);
+    IP_ADDR4(&dns, 8, 8, 8, 8);
+    dns_setserver(1, &dns);
 
-static esp_err_t http_evt(esp_http_client_event_t *evt) {
-    resp_buf_t *rb = (resp_buf_t *)evt->user_data;
-    if (evt->event_id == HTTP_EVENT_ON_DATA && rb && evt->data && evt->data_len && rb->buf) {
-        size_t n = evt->data_len;
-        if (n > rb->cap - rb->len - 1) n = rb->cap - rb->len - 1;
+    if (s_ppp_netif) {
+        esp_netif_dns_info_t d1 = { .ip.type = ESP_IPADDR_TYPE_V4 };
+        d1.ip.u_addr.ip4.addr = ipaddr_addr("1.1.1.1");
+        esp_netif_set_dns_info(s_ppp_netif, ESP_NETIF_DNS_MAIN, &d1);
+        esp_netif_dns_info_t d2 = { .ip.type = ESP_IPADDR_TYPE_V4 };
+        d2.ip.u_addr.ip4.addr = ipaddr_addr("8.8.8.8");
+        esp_netif_set_dns_info(s_ppp_netif, ESP_NETIF_DNS_BACKUP, &d2);
+    }
+}
+
+
+/* ===================== UnwiredLabs (HTTPS) ===================== */
+/* Patrón “Geoapify”: buffer estático + event handler acumulador */
+#define UL_BODY_MAX  4096
+static char ul_body[UL_BODY_MAX];   // respuesta (JSON)
+
+typedef struct { char *buf; int max; int len; } ul_accum_t;
+
+static esp_err_t ul_http_evt(esp_http_client_event_t *evt) {
+    ul_accum_t *acc = (ul_accum_t *)evt->user_data;
+    if (evt->event_id == HTTP_EVENT_ON_DATA && acc && acc->buf && evt->data && evt->data_len) {
+        int room = acc->max - acc->len - 1;
+        int n = (evt->data_len < room) ? evt->data_len : room;
         if (n > 0) {
-            memcpy(rb->buf + rb->len, evt->data, n);
-            rb->len += n;
-            rb->buf[rb->len] = '\0';
+            memcpy(acc->buf + acc->len, evt->data, n);
+            acc->len += n;
+            acc->buf[acc->len] = '\0';
         }
     }
     return ESP_OK;
 }
 
+/* Parser string->valor tipo JSON ligero (sin ArduinoJson) */
 static bool json_get_string(const char *json, const char *key, char *out, size_t outlen) {
     if (!json || !key || !out || outlen == 0) return false;
     char pat[64];
@@ -288,103 +310,106 @@ esp_err_t modem_unwiredlabs_city_state(char *city, size_t city_len,
         return ESP_FAIL;
     }
     if (UNWIREDLABS_TOKEN[0] == '\0') {
-        ESP_LOGE(TAG, "UNWIREDLABS_TOKEN vacío (defínelo en Privado.h)");
+        ESP_LOGE(TAG, "UNWIREDLABS_TOKEN vacío (defínelo en privado.h)");
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* UL usa 'lac' para TAC y 'cid' para ECI en LTE. address=2 pide address_detail. */
-    char body[256];
-    int blen = snprintf(body, sizeof(body),
+    /* UL usa 'lac' para TAC/LAC y 'cid' para ECI/CID. address=2 pide address_detail */
+    char payload[256];
+    int plen = snprintf(payload, sizeof(payload),
         "{\"token\":\"%s\",\"radio\":\"lte\",\"mcc\":%d,\"mnc\":%d,"
         "\"cells\":[{\"lac\":%u,\"cid\":%u}],\"address\":2}",
         UNWIREDLABS_TOKEN, s_ue_info.mcc, s_ue_info.mnc,
         (unsigned)s_ue_info.tac, (unsigned)s_ue_info.cell_id);
-    if (blen <= 0 || blen >= (int)sizeof(body)) {
-        ESP_LOGE(TAG, "Payload JSON demasiado grande");
+    if (plen <= 0 || plen >= (int)sizeof(payload)) {
+        ESP_LOGW(TAG, "payload truncado");
         return ESP_FAIL;
     }
 
-    char resp[2048] = {0};
-    resp_buf_t rb = { .buf = heap_caps_malloc(4096, MALLOC_CAP_DEFAULT),
-                  .cap = 4096, .len = 0 };
-    if (!rb.buf) return ESP_ERR_NO_MEM;
+    const int MAX_ATTEMPTS = 5;
+    esp_err_t last_err = ESP_FAIL;
 
-    heap_caps_check_integrity_all(true);
+    for (int attempt = 1; attempt <= MAX_ATTEMPTS; ++attempt) {
+        ESP_LOGI(TAG, "UL intento %d/%d", attempt, MAX_ATTEMPTS);
 
-    esp_http_client_config_t cfg = {
-        .host = UNWIRED_HOST,
-        .path = UNWIRED_PATH,
-        .port = UNWIRED_PORT,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 15000,
-        .event_handler = http_evt,
-        .user_data = &rb,
-        .disable_auto_redirect = false,
-        .transport_type = HTTP_TRANSPORT_OVER_SSL,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .buffer_size = 1024,
-        .buffer_size_tx = 512,
-    };
+        /* Acumulador estilo Geoapify */
+        memset(ul_body, 0, sizeof(ul_body));
+        ul_accum_t acc = { .buf = ul_body, .max = UL_BODY_MAX, .len = 0 };
 
-    heap_caps_check_integrity_all(true);
+        /* Checkpoint de integridad de heap ANTES del init del client */
+        heap_caps_check_integrity_all(true);
 
-    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
-    if (!cli) {
-        ESP_LOGE(TAG, "No se pudo crear http client");
-        return ESP_FAIL;
-    }
+        force_public_dns();  // asegúrate de llamarla aquí
 
-    esp_http_client_set_header(cli, "Content-Type", "application/json");
-    esp_http_client_set_post_field(cli, body, blen);
-
-    esp_err_t err = esp_http_client_perform(cli);
-    int status = esp_http_client_get_status_code(cli);
-    int64_t clen = esp_http_client_get_content_length(cli);
-    ESP_LOGI(TAG, "UL HTTP %d, len=%lld", status, (long long)clen);
-    ESP_LOGI(TAG, "UL Body: %.*s", (int)rb.len, resp);
-    esp_http_client_cleanup(cli);
-    
-
-    if (err != ESP_OK || status != 200 || rb.len == 0) {
-        ESP_LOGW(TAG, "Fallo HTTP o respuesta vacía (err=%s, status=%d, len=%u)",
-                 esp_err_to_name(err), status, (unsigned)rb.len);
-        return (err != ESP_OK) ? err : ESP_FAIL;
-    }
-
-    /* Verifica status JSON */
-    char api_status[16] = "";
-    if (json_get_string(resp, "status", api_status, sizeof(api_status))) {
-        if (strcmp(api_status, "ok") != 0 && strcmp(api_status, "OK") != 0) {
-            ESP_LOGW(TAG, "API status='%s'", api_status);
-            return ESP_FAIL;
+        struct ifreq ifr = {0};
+        if (s_ppp_netif) {
+            esp_netif_get_netif_impl_name(s_ppp_netif, ifr.ifr_name);
         }
+
+        esp_http_client_config_t cfg = {
+            .url = UNWIRED_URL,                     // igual que tu ejemplo Geoapify
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = 15000,
+            .event_handler = ul_http_evt,
+            .user_data = &acc,
+            .buffer_size = 1024,
+            .buffer_size_tx = 512,
+            .method = HTTP_METHOD_POST,
+            .if_name = s_ppp_netif ? &ifr : NULL  // <<--- liga a PPP
+        };
+
+        esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+        if (!cli) {
+            ESP_LOGW(TAG, "no client");
+            vTaskDelay(pdMS_TO_TICKS(300 * attempt));
+            continue;
+        }
+
+        esp_http_client_set_header(cli, "Content-Type", "application/json");
+        esp_http_client_set_post_field(cli, payload, plen);
+
+        int64_t t0 = esp_timer_get_time();
+        esp_err_t err = esp_http_client_perform(cli);
+        int64_t t1 = esp_timer_get_time();
+
+        int status = esp_http_client_get_status_code(cli);
+        int cl = esp_http_client_get_content_length(cli);
+        ESP_LOGI(TAG, "HTTP %d cl=%d t=%lld ms len=%d",
+                 status, cl, (long long)((t1-t0)/1000), acc.len);
+
+        last_err = err;
+        esp_http_client_cleanup(cli);
+
+        if (err == ESP_OK && status == 200 && acc.len > 0) {
+            /* Verifica "status":"ok" */
+            char api_status[8] = "";
+            (void)json_get_string(ul_body, "status", api_status, sizeof(api_status));
+            if (strcasecmp(api_status, "ok") != 0) {
+                ESP_LOGW(TAG, "API status no OK ('%s')", api_status);
+            } else {
+                /* city/state: a veces en "address" o en "address_detail" */
+                const char *addr = strstr(ul_body, "\"address\"");
+                if (!addr) addr = strstr(ul_body, "\"address_detail\"");
+                if (!addr) addr = ul_body;
+
+                (void)json_get_string(addr, "city",  city,  city_len);
+                (void)json_get_string(addr, "state", state, state_len);
+
+                if ((city && city[0]) || (state && state[0])) {
+                    return ESP_OK;
+                }
+                ESP_LOGW(TAG, "Sin address.city/state en respuesta");
+            }
+        } else {
+            ESP_LOGW(TAG, "HTTP fallo %s", esp_err_to_name(err));
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(300 * attempt)); // backoff suave
     }
 
-    /* city/state: a veces vienen dentro de "address" o "address_detail" */
-    const char *addr = strstr(resp, "\"address\":");
-    const char *start = addr ? strchr(addr, '{') : NULL;
-    const char *end   = start ? strchr(start, '}') : NULL;
-
-    if (start && end && end > start) {
-        char tmp[512] = {0};
-        size_t n = (size_t)(end - start + 1);
-        if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
-        memcpy(tmp, start, n);
-        tmp[n] = 0;
-
-        (void)json_get_string(tmp, "city",  city,  city_len);
-        (void)json_get_string(tmp, "state", state, state_len);
-    } else {
-        (void)json_get_string(resp, "city",  city,  city_len);
-        (void)json_get_string(resp, "state", state, state_len);
-    }
-
-    if ((city && city[0]) || (state && state[0])) return ESP_OK;
-    ESP_LOGW(TAG, "Sin address.city/state en respuesta");
-    free(rb.buf);
-    return ESP_FAIL;
+    return last_err ? last_err : ESP_FAIL;
 }
-/* =================== /UnwiredLabs (HTTP/S) ===================== */
+/* =================== /UnwiredLabs (HTTPS) ===================== */
 
 /* ===== Arranque PPP bloqueante ===== */
 esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
@@ -393,18 +418,20 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
 {
     if (!cfg || !cfg->apn) return ESP_ERR_INVALID_ARG;
 
+    /* Crea PPP netif y registra eventos */
     esp_netif_config_t nc = ESP_NETIF_DEFAULT_PPP();
     esp_netif_t *ppp = esp_netif_new(&nc);
     if (!ppp) return ESP_FAIL;
-
+    s_ppp_netif = ppp;  // guarda para bind
     esp_netif_set_default_netif(ppp);
 
     if (!s_ppp_eg) s_ppp_eg = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &on_ip_event, NULL));
 
+    /* Power-on del módem */
     hw_boot(cfg);
 
-    /* DTE */
+    /* DTE (UART) */
     esp_modem_dte_config_t dte_cfg = ESP_MODEM_DTE_DEFAULT_CONFIG();
     dte_cfg.uart_config.port_num   = UART_NUM_1;
     dte_cfg.uart_config.baud_rate  = 115200;
@@ -427,7 +454,7 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
     modem_send_at_and_log(dce, "AT",        3000);
     modem_send_at_and_log(dce, "ATE0",      3000);
     modem_send_at_and_log(dce, "AT+CMEE=2", 3000);
-    (void)esperar_cereg(dce, 15000, 500);   // opcional pero recomendado en LTE
+    (void)esperar_cereg(dce, 15000, 500);   // opcional pero recomendado en LTE/2G
 
     /* 2) Obtener CPSI con reintentos y parsearlo */
     char cpsi[128] = {0};
@@ -437,7 +464,7 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
         if (parse_cpsi_line(cpsi, &info) && cpsi_se_ve_valido(cpsi)) {
             s_ue_info   = info;
             s_ue_valid  = true;
-            ESP_LOGI(TAG, "UE: MCC=%d MNC=%d TAC=%" PRIu32 " ECI=%" PRIu32,
+            ESP_LOGI(TAG, "UE: MCC=%d MNC=%d TAC/LAC=%" PRIu32 " ECI/CID=%" PRIu32,
                      info.mcc, info.mnc, info.tac, info.cell_id);
         } else {
             s_ue_valid = false;
@@ -448,7 +475,7 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
         ESP_LOGW(TAG, "CPSI no confiable tras reintentos: %s", cpsi);
     }
 
-    /* 3) Handshake corto por esp_modem_command (sin re-entrar COMMAND) */
+    /* 3) Handshake corto con esp_modem_command() */
     char at_rsp[64] = {0};
     s_acc = (at_acc_t){ .buf = at_rsp, .size = sizeof(at_rsp), .used = 0 };
     esp_err_t at_ok = esp_modem_command(dce, "AT\r", at_acc_cb, 1000);
@@ -497,3 +524,4 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
 
     return ESP_OK;
 }
+

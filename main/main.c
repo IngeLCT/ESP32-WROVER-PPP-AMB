@@ -71,12 +71,12 @@ static void sensor_task(void *pv) {
     SensorData data;
 
     // Hora de arranque (inicio)
-    time_t start_epoch;
-    struct tm start_tm_info;
-    char inicio_str[20] = "00:00:00";
-    time(&start_epoch);
-    localtime_r(&start_epoch, &start_tm_info);
-    strftime(inicio_str, sizeof(inicio_str), "%H:%M:%S", &start_tm_info);
+    time_t now_epoch;
+    struct tm tm_info;
+    time(&now_epoch);
+    localtime_r(&now_epoch, &tm_info);
+    char inicio_str[16];
+    strftime(inicio_str, sizeof(inicio_str), "%H:%M:%S", &tm_info);
 
     const uint32_t TOKEN_REFRESH_INTERVAL_SEC = 50 * 60; // 50 minutos
     time_t last_token_refresh = time(NULL);

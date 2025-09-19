@@ -88,8 +88,8 @@ static bool at_cmd(esp_modem_dce_t *dce, const char *cmd,
 {
     if (!out || outlen < CONFIG_ESP_MODEM_C_API_STR_MAX) return false;
     memset(out, 0, outlen);
-    // esp_modem_at() añade el CR internamente; devuelve OK/FAIL/TIMEOUT
-    return (esp_modem_at(dce, cmd, out, (int)to_ms));
+    command_result r = esp_modem_at(dce, cmd, out, (int)to_ms);
+    return (r == OK);                 // <-- ¡no boolean-cast directo!
 }
 
 /* Parsers de celda */
@@ -213,14 +213,12 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
     // COMMAND antes del handshake
     ESP_ERROR_CHECK( esp_modem_set_mode(dce, ESP_MODEM_MODE_COMMAND) );
 
-    // Handshake: AT + eco off
-    char at_rsp[64] = {0};
-    if (!at_cmd(dce, "AT\r", at_rsp, sizeof(at_rsp), 5000)) {
-        ESP_LOGE(TAG, "El módem no responde a AT. rsp='%s' (verifica PWRKEY/baud/TX-RX/GND)", at_rsp);
-        return ESP_ERR_TIMEOUT;
-    }
-    (void)at_cmd(dce, "ATE0\r", at_rsp, sizeof(at_rsp), 5000);
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    at_cmd(dce, "AT",        buf, sizeof(buf), 5000);
+    at_cmd(dce, "ATE0",      buf, sizeof(buf), 5000);
+    at_cmd(dce, "AT+CPSI?",  buf, sizeof(buf), 5000);
+    at_cmd(dce, "AT+COPS=3,2", buf, sizeof(buf), 2000);
+    at_cmd(dce, "AT+COPS?",    buf, sizeof(buf), 3000);
+    at_cmd(dce, "AT+CEREG?",   buf, sizeof(buf), 3000);
 
     // Pasa a DATA (PPP). Con fallback si venía CMUX
     esp_err_t mode_err = esp_modem_set_mode(dce, cfg->use_cmux ? ESP_MODEM_MODE_CMUX

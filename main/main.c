@@ -13,7 +13,6 @@
 #include "esp_sntp.h"
 
 // Project
-#include "unwiredlabs.h"
 #include "sensors.h"
 #include "firebase.h"
 #include "Privado.h"
@@ -244,12 +243,10 @@ void app_main(void)
     init_sntp_and_time();
 
     // === 3) Geolocalización por celda (AT + UnwiredLabs) => g_city sin comas ===
-    /*if (UNWIREDLABS_TOKEN[0]) {
-        char city[64] = "", state[64] = "", fdate[16] = "", ftime[16] = "";
-        if (modem_geolocate_from_cell(g_dce, UNWIREDLABS_TOKEN,
-                                      city, sizeof(city), state, sizeof(state),
-                                      fdate, sizeof(fdate), ftime, sizeof(ftime))) {
-            build_city_hyphen(g_city, sizeof(g_city), city, state); // <-- "Ciudad-Estado"
+    if (UNWIREDLABS_TOKEN[0]) {
+        char city[64] = "", state[64] = "";
+        if (modem_unwiredlabs_city_state(city, sizeof(city), state, sizeof(state)) == ESP_OK) {
+            build_city_hyphen(g_city, sizeof(g_city), city, state); // "Ciudad-Estado" sin comas
             ESP_LOGI(TAG_APP, "Ciudad para JSON (1a vez): %s", g_city);
         } else {
             ESP_LOGW(TAG_APP, "No se pudo geolocalizar por celda. Ciudad='----'");
@@ -257,8 +254,8 @@ void app_main(void)
             g_city[sizeof(g_city)-1] = '\0';
         }
     } else {
-        ESP_LOGW(TAG_APP, "UNWIREDLABS_TOKEN vacío. Ciudad quedará '----'");
-    }*/
+            ESP_LOGW(TAG_APP, "UNWIREDLABS_TOKEN vacío. Ciudad quedará '----'");
+    }
 
     // === 4) Sensores y task de envío a Firebase ===
     esp_err_t sret = sensors_init_all();

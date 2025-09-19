@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_err.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_ppp.h"
@@ -40,7 +41,11 @@ static void hw_boot(const modem_ppp_config_t *c) {
 
     if (c->rst_io >= 0) {                       // NO reset al inicio
         gpio_set_direction(c->rst_io, GPIO_MODE_OUTPUT);
-        gpio_set_level(c->rst_io, c->rst_active_low ? 1 : 0); // inactivo
+        gpio_set_level(c->rst_io,0); // inactivo
+        vTaskDelay(pdMS_TO_TICKS(100));
+        gpio_set_level(c->rst_io, 1 ); // activo
+        vTaskDelay(pdMS_TO_TICKS(2600));
+        gpio_set_level(c->rst_io,0); // inactivo
     }
 
     if (c->dtr_io >= 0) {                       // DTR inactivo
@@ -53,7 +58,7 @@ static void hw_boot(const modem_ppp_config_t *c) {
         gpio_set_level(c->pwrkey_io, 1);
         vTaskDelay(pdMS_TO_TICKS(100));
         gpio_set_level(c->pwrkey_io, 0);
-        vTaskDelay(pdMS_TO_TICKS(1200));
+        vTaskDelay(pdMS_TO_TICKS(100));
         gpio_set_level(c->pwrkey_io, 1);
     }
 
@@ -64,6 +69,7 @@ static void hw_boot(const modem_ppp_config_t *c) {
 /* Pequeño acumulador para respuestas AT (por si quieres loguearlas) */
 typedef struct { char *buf; size_t size; size_t used; } at_acc_t;
 static at_acc_t s_acc;
+
 static esp_err_t at_acc_cb(uint8_t *data, size_t len) {
     size_t n = (len < (s_acc.size - s_acc.used - 1)) ? len : (s_acc.size - s_acc.used - 1);
     if (n > 0 && s_acc.buf) {
@@ -72,6 +78,94 @@ static esp_err_t at_acc_cb(uint8_t *data, size_t len) {
         s_acc.buf[s_acc.used] = '\0';
     }
     return ESP_OK;
+}
+
+static bool cpsi_se_ve_valido(const char *s) {
+    if (!s || !*s) return false;
+    // Casos a descartar (lo que viste cuando aún no está listo):
+    if (strstr(s, "NO SERVICE")) return false;
+    if (strstr(s, "000-00"))     return false;  // MCC-MNC nulos
+    if (strstr(s, "BAND0"))      return false;  // banda nula/transitoria
+    if (strstr(s, ",0,0,") || strstr(s, ",00000000,")) return false; // CellID/TAC nulos
+    return true;
+}
+
+static bool cereg_registrado(const char *rsp) {
+    // Formato típico: +CEREG: <n>,<stat>[,...] ; stat=1 (home) o 5 (roaming)
+    return (rsp && (strstr(rsp, ",1") || strstr(rsp, ",5")));
+}
+
+static esp_err_t esperar_cereg(esp_modem_dce_t *dce, int timeout_ms, int poll_ms) {
+    int elapsed = 0;
+    char out[128] = {0};
+    while (elapsed < timeout_ms) {
+        // Asegura CR al final:
+        esp_err_t err = esp_modem_at(dce, "AT+CEREG?\r", out, 2000);
+        if (err == ESP_OK && cereg_registrado(out)) {
+            ESP_LOGI(TAG, "CEREG OK: %s", out);
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+        elapsed += poll_ms;
+    }
+    ESP_LOGW(TAG, "CEREG no llegó a registrado en %d ms (último: %s)", timeout_ms, out);
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t cpsi_con_reintentos(esp_modem_dce_t *dce,
+                                     char *out_final, size_t out_len,
+                                     int intentos, int delay_ms)
+{
+    char out[256] = {0};
+    esp_err_t last = ESP_FAIL;
+
+    for (int i = 0; i < intentos; ++i) {
+        memset(out, 0, sizeof(out));
+        last = esp_modem_at(dce, "AT+CPSI?\r", out, 12000); // 12s > 9000ms (manual)
+        if (last == ESP_OK && cpsi_se_ve_valido(out)) {
+            if (out_final && out_len) strlcpy(out_final, out, out_len);
+            ESP_LOGI(TAG, "CPSI intento %d/%d OK: %s", i+1, intentos, out);
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "CPSI intento %d/%d %s: %s",
+                 i+1, intentos, (last==ESP_OK ? "inválido" : esp_err_to_name(last)), out);
+        vTaskDelay(pdMS_TO_TICKS(delay_ms + i*delay_ms)); // backoff lineal
+    }
+    if (out_final && out_len) strlcpy(out_final, out, out_len);
+    return last == ESP_OK ? ESP_FAIL : last;
+}
+
+esp_err_t modem_send_at_and_log(esp_modem_dce_t *dce,
+                                const char *cmd,
+                                int timeout_ms)
+{
+    char out[256] = {0};
+
+    char cmd_cr[64];
+    size_t n = strlen(cmd);
+    if (n > 0 && cmd[n-1] == '\r') {
+        strlcpy(cmd_cr, cmd, sizeof(cmd_cr));
+    } else {
+        snprintf(cmd_cr, sizeof(cmd_cr), "%s\r", cmd);
+    }
+
+    // Por si acaso, garantiza modo COMANDO
+    esp_modem_set_mode(dce, ESP_MODEM_MODE_COMMAND);
+
+    esp_err_t err = esp_modem_at(dce, cmd_cr, out, timeout_ms);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "AT '%s' OK. Respuesta: %s", cmd, out);
+    } else {
+        ESP_LOGE(TAG, "AT '%s' FAIL (%s). Última línea: %s", cmd, esp_err_to_name(err), out);
+    }
+    return err;
+}
+
+static esp_err_t set_mode_if_needed(esp_modem_dce_t *dce, esp_modem_dce_mode_t target)
+{
+    esp_modem_dce_mode_t cur = esp_modem_get_mode(dce);   // devuelve el modo actual
+    if (cur == target) return ESP_OK;
+    return esp_modem_set_mode(dce, target);
 }
 
 esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
@@ -113,10 +207,28 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
     // APN explícito
     ESP_ERROR_CHECK(esp_modem_set_apn(dce, cfg->apn));
 
-    // Entra a COMMAND antes del handshake
-    ESP_ERROR_CHECK( esp_modem_set_mode(dce, ESP_MODEM_MODE_COMMAND) );
+    // ====== CAMBIO 1: Asegurar COMMAND antes de cualquier AT ======
+    ESP_ERROR_CHECK(set_mode_if_needed(dce, ESP_MODEM_MODE_COMMAND));
 
-    // Handshake AT (equivalente a "esp_modem_sync()") usando la C-API segura
+    // ====== AT de verificación (con \r) ======
+    modem_send_at_and_log(dce, "AT",        3000);
+    modem_send_at_and_log(dce, "ATE0",      3000);
+    modem_send_at_and_log(dce, "AT+CMEE=2", 3000);
+
+    // Espera opcional a registro (reduce CPSI "vacío")
+    (void)esperar_cereg(dce, /*timeout_ms=*/15000, /*poll_ms=*/500);
+
+    // CPSI con reintentos
+    char cpsi[128] = {0};
+    esp_err_t cpsi_ok = cpsi_con_reintentos(dce, cpsi, sizeof(cpsi),
+                                            /*intentos=*/3, /*delay_ms=*/700);
+    if (cpsi_ok == ESP_OK) {
+        ESP_LOGI(TAG, "CPSI final: %s", cpsi);
+    } else {
+        ESP_LOGW(TAG, "CPSI no confiable tras reintentos: %s", cpsi);
+    }
+
+    // ====== CAMBIO 2: Handshake "AT" usando esp_modem_command y sin re-entrar COMMAND ======
     char at_rsp[64] = {0};
     s_acc = (at_acc_t){ .buf = at_rsp, .size = sizeof(at_rsp), .used = 0 };
     esp_err_t at_ok = esp_modem_command(dce, "AT\r", at_acc_cb, 1000);
@@ -124,15 +236,15 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
         ESP_LOGE(TAG, "El módem no responde a AT. rsp='%s' (verifica PWRKEY/baud/TX-RX/GND)", at_rsp);
         return at_ok;
     }
-    (void)esp_modem_command(dce, "ATE0\r", at_acc_cb, 1000);  // eco off
+    (void)esp_modem_command(dce, "ATE0\r", at_acc_cb, 1000);
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Ahora sí: a DATA (PPP). Si CMUX estaba pedido y falla, cae a DATA.
-    esp_err_t mode_err = esp_modem_set_mode(dce, cfg->use_cmux ? ESP_MODEM_MODE_CMUX
+    // ====== CAMBIO 3: Entrar a DATA o CMUX usando el guard ======
+    esp_err_t mode_err = set_mode_if_needed(dce, cfg->use_cmux ? ESP_MODEM_MODE_CMUX
                                                                : ESP_MODEM_MODE_DATA);
     if (mode_err != ESP_OK && cfg->use_cmux) {
         ESP_LOGW(TAG, "set_mode(CMUX) falló: %s; reintentando DATA…", esp_err_to_name(mode_err));
-        mode_err = esp_modem_set_mode(dce, ESP_MODEM_MODE_DATA);
+        mode_err = set_mode_if_needed(dce, ESP_MODEM_MODE_DATA);
     }
     ESP_ERROR_CHECK(mode_err);
 

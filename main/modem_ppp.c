@@ -83,14 +83,13 @@ static esp_err_t at_acc_cb(uint8_t *data, size_t len) {
     return ESP_OK;
 }
 
-static bool at_cmd(esp_modem_dce_t *dce, const char *cmd, char *out, size_t outlen, uint32_t to_ms) {
-    if (!out || outlen < 32) return false;
+static bool at_cmd(esp_modem_dce_t *dce, const char *cmd,
+                   char *out, size_t outlen, uint32_t to_ms)
+{
+    if (!out || outlen < CONFIG_ESP_MODEM_C_API_STR_MAX) return false;
     memset(out, 0, outlen);
-    // Resetea acumulador de forma explícita y defensiva
-    s_acc.buf  = out;
-    s_acc.size = outlen;
-    s_acc.used = 0;
-    return (esp_modem_command(dce, cmd, at_acc_cb, (int)to_ms) == ESP_OK);
+    // esp_modem_at() añade el CR internamente; devuelve OK/FAIL/TIMEOUT
+    return (esp_modem_at(dce, cmd, out, (int)to_ms));
 }
 
 /* Parsers de celda */
@@ -216,12 +215,12 @@ esp_err_t modem_ppp_start_blocking(const modem_ppp_config_t *cfg,
 
     // Handshake: AT + eco off
     char at_rsp[64] = {0};
-    if (!at_cmd(dce, "AT\r", at_rsp, sizeof(at_rsp), 1000)) {
+    if (!at_cmd(dce, "AT\r", at_rsp, sizeof(at_rsp), 5000)) {
         ESP_LOGE(TAG, "El módem no responde a AT. rsp='%s' (verifica PWRKEY/baud/TX-RX/GND)", at_rsp);
         return ESP_ERR_TIMEOUT;
     }
-    (void)at_cmd(dce, "ATE0\r", at_rsp, sizeof(at_rsp), 1000);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    (void)at_cmd(dce, "ATE0\r", at_rsp, sizeof(at_rsp), 5000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     // Pasa a DATA (PPP). Con fallback si venía CMUX
     esp_err_t mode_err = esp_modem_set_mode(dce, cfg->use_cmux ? ESP_MODEM_MODE_CMUX
@@ -272,11 +271,13 @@ bool modem_get_cell_info(esp_modem_dce_t *dce, int *mcc, int *mnc, int *tac, int
     esp_modem_pause_net(dce, true);
 
     // 1) Intento con CPSI
-    if (at_cmd(dce, "AT+CPSI?\r", buf, sizeof(buf), 5000)) {
+    if (at_cmd(dce, "AT+CPSI?", buf, sizeof(buf), 5000)) {
         const char *line = strstr(buf, "+CPSI:");
         if (line && parse_cpsi_line(line, mcc, mnc, tac, cid)) {
             esp_modem_pause_net(dce, false);
             ESP_LOGI(TAG, "CPSI: MCC=%d MNC=%d TAC=%d CID=%d", mcc?*mcc:-1, mnc?*mnc:-1, tac?*tac:-1, cid?*cid:-1);
+            ESP_LOGI(TAG, "Respuesta: %s", buf);
+            ESP_LOGI(TAG, "Respuesta: %s", line);
             return true;
         }
     }

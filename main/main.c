@@ -211,6 +211,9 @@ static void sensor_task(void *pv) {
 
 void app_main(void)
 {
+    // esp_log_level_set("esp_modem", ESP_LOG_VERBOSE);
+    // esp_log_level_set("command_lib", ESP_LOG_VERBOSE);
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -222,12 +225,13 @@ void app_main(void)
     // === 1) Arranca PPP ===
     modem_ppp_config_t cfg = {
         .tx_io = 26, .rx_io = 27,
-        .rts_io = -1, .cts_io = -1,     // sin flow control
+        .rts_io = -1, .cts_io = -1,     // sin flow control por ahora
         .dtr_io = 25,
         .rst_io = 5, .pwrkey_io = 4, .board_power_io = 12,
         .rst_active_low = true, .rst_pulse_ms = 200,
         .apn = "internet.itelcel.com",
-        .use_cmux = false               // mantener en false
+        .sim_pin = "",
+        .use_cmux = false               // ¡dejar en false!
     };
     esp_err_t mret = modem_ppp_start_blocking(&cfg, 120000 /* 120s timeout */, &g_dce);
     if (mret != ESP_OK) {
@@ -239,34 +243,21 @@ void app_main(void)
     // === 2) SNTP con PPP activo ===
     init_sntp_and_time();
 
-    // === 3) Geolocalización por celda ===
+    // === 3) Geolocalización por celda (AT + UnwiredLabs) => g_city sin comas ===
     if (UNWIREDLABS_TOKEN[0]) {
-        int mcc=0, mnc=0, tac=0, cid=0;
-        if (modem_geolocate_from_cell(g_dce, &mcc, &mnc, &tac, &cid)) {
-            char city[64] = "", state[64] = "", fdate[16] = "", ftime[16] = "";
-            if (unwiredlabs_geolocate(UNWIREDLABS_TOKEN,
-                                      mcc, mnc, tac, cid,
-                                      city, sizeof(city),
-                                      state, sizeof(state),
-                                      fdate, sizeof(fdate),
-                                      ftime, sizeof(ftime))) {
-                // Guardar ciudad solo la primera vez, con "-" en vez de coma
-                build_city_hyphen(g_city, sizeof(g_city), city, state);
-                ESP_LOGI(TAG_APP, "Ciudad detectada (solo 1a vez): %s", g_city);
-            } else {
-                ESP_LOGW(TAG_APP, "No se pudo geolocalizar por celda. Ciudad='----'");
-                strncpy(g_city, "----", sizeof(g_city));
-                g_city[sizeof(g_city)-1] = '\0';
-            }
+        char city[64] = "", state[64] = "", fdate[16] = "", ftime[16] = "";
+        if (modem_geolocate_from_cell(g_dce, UNWIREDLABS_TOKEN,
+                                      city, sizeof(city), state, sizeof(state),
+                                      fdate, sizeof(fdate), ftime, sizeof(ftime))) {
+            build_city_hyphen(g_city, sizeof(g_city), city, state); // <-- "Ciudad-Estado"
+            ESP_LOGI(TAG_APP, "Ciudad para JSON (1a vez): %s", g_city);
         } else {
-            ESP_LOGW(TAG_APP, "AT+CPSI? no devolvió datos válidos. Ciudad='----'");
+            ESP_LOGW(TAG_APP, "No se pudo geolocalizar por celda. Ciudad='----'");
             strncpy(g_city, "----", sizeof(g_city));
             g_city[sizeof(g_city)-1] = '\0';
         }
     } else {
         ESP_LOGW(TAG_APP, "UNWIREDLABS_TOKEN vacío. Ciudad quedará '----'");
-        strncpy(g_city, "----", sizeof(g_city));
-        g_city[sizeof(g_city)-1] = '\0';
     }
 
     // === 4) Sensores y task de envío a Firebase ===

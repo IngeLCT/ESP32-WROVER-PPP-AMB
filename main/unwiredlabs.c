@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "unwired";
 
@@ -96,6 +97,7 @@ bool unwiredlabs_geolocate(const char *token,
         .buffer_size_tx = 512,   // TX interno del cliente
     };
 
+    heap_caps_check_integrity_all(true);  // <-- pega esto
     esp_http_client_handle_t cli = esp_http_client_init(&cfg);
     if (!cli) {
         ESP_LOGE(TAG, "No se pudo crear http client");

@@ -29,12 +29,6 @@ static inline int64_t minutes_to_us(int m) { return (int64_t)m * 60 * 1000000; }
 static char g_city[64]  = "----";
 
 #define LOG_EACH_SAMPLE 1
-#ifndef UNWIREDLABS_TOKEN
-#define UNWIREDLABS_TOKEN "" // define en Privado.h
-#endif
-#ifndef DEVICE_ID
-#define DEVICE_ID "5585782271"
-#endif
 
 static void init_sntp_and_time(void) {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
@@ -245,7 +239,7 @@ void app_main(void)
         .sim_pin = "",
         .use_cmux = false               // ¡dejar en false!
     };
-    esp_err_t mret = modem_ppp_start_blocking(&cfg, 120000 /* 120s timeout */, &g_dce);
+    esp_err_t mret = modem_ppp_start_blocking(&cfg, 150000 /* 150s timeout */, &g_dce);
     if (mret != ESP_OK) {
         ESP_LOGE(TAG_APP, "No se pudo levantar PPP (%s). Reiniciando...", esp_err_to_name(mret));
         vTaskDelay(pdMS_TO_TICKS(3000));
@@ -272,7 +266,7 @@ void app_main(void)
             ESP_LOGW(TAG_APP, "UNWIREDLABS_TOKEN vacío. Ciudad quedará '----'");
             sensors_set_city_state("----");
     }
-
+    vTaskDelay(pdMS_TO_TICKS(1500));
     // === 4) Sensores y task de envío a Firebase ===
     esp_err_t sret = sensors_init_all();
     if (sret != ESP_OK) {

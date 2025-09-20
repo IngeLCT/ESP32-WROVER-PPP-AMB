@@ -87,7 +87,8 @@ void FirebaseApp::firebaseClientInit(void)
     config.buffer_size_tx = 4096;
     config.buffer_size = HTTP_RECV_BUFFER_SIZE;
     // Timeout razonable (ms)
-    config.timeout_ms = 20000; // 15s
+    config.timeout_ms = 20000; // 20s
+    this->default_timeout_ms = config.timeout_ms;  // 20 s por defecto
     // Deshabilitamos keep-alive: el server parece cerrar tras inactividad (~10 min) provocando RST en primer write
     config.keep_alive_enable = false;
     FirebaseApp::client = esp_http_client_init(&config);
@@ -105,7 +106,7 @@ http_ret_t FirebaseApp::performRequest(const char* url,
                                        esp_http_client_method_t method,
                                        std::string post_field)
 {
-    const int MAX_ATTEMPTS = 2; // 1 intento + 1 reintento
+    const int MAX_ATTEMPTS = 5; // 1 intento + 1 reintento
     esp_err_t err = ESP_FAIL;
     int status_code = -1;
 
@@ -163,7 +164,7 @@ http_ret_t FirebaseApp::performRequest(const char* url,
             esp_http_client_set_post_field(FirebaseApp::client, "", 0);
             esp_http_client_set_header(FirebaseApp::client, "Content-Length", "0");
         }
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
     return {err, status_code};
 }
@@ -174,6 +175,16 @@ void FirebaseApp::clearHTTPBuffer(void)
     memset(FirebaseApp::local_response_buffer, 0, HTTP_RECV_BUFFER_SIZE);
     output_len = 0;
 }
+
+void FirebaseApp::setHttpTimeoutMs(int ms) {
+    if (this->client) esp_http_client_set_timeout_ms(this->client, ms);
+}
+
+void FirebaseApp::restoreDefaultHttpTimeout() {
+    if (this->client) esp_http_client_set_timeout_ms(this->client, this->default_timeout_ms);
+}
+
+
 esp_err_t FirebaseApp::getRefreshToken(bool register_account)
 {
 
@@ -251,44 +262,6 @@ esp_err_t FirebaseApp::getAuthToken()
 
     
 }
-
-// esp_err_t FirebaseApp::nvsSaveTokens() // useless until expire time added
-// {
-//     nvs_handle_t my_handle;
-//     esp_err_t err;
-//     err = nvs_open("storage", NVS_READWRITE, &my_handle);
-//     err = nvs_set_str(my_handle, "refresh", FirebaseApp::refresh_token.c_str());
-//     err = nvs_set_str(my_handle, "auth", FirebaseApp::auth_token.c_str());
-//     err = nvs_commit(my_handle);
-//     nvs_close(my_handle);
-//     ESP_LOGD(NVS_TAG, "Tokens saved");
-//     return err;
-
-// }
-// esp_err_t FirebaseApp::nvsReadTokens() // useless until expire time added
-// {
-//     nvs_handle_t my_handle;
-//     esp_err_t err;
-//     int refresh_len, auth_len = 0;
-//     char refresh[500] = {0};
-//     char auth[500] = {0};
-//     err = nvs_open("storage", NVS_READWRITE, &my_handle);
-
-//     // err = nvs_set_i16(my_handle, "refresh_len", &refresh_len);
-//     // err = nvs_set_i16(my_handle, "auth_len", &auth_len);
-
-//     err = nvs_get_str(&my_handle, "refresh", &refresh_temp, &refresh_len);
-//     err = nvs_get_str(&my_handle, "auth", &auth_temp, &auth_len);
-//     err = nvs_commit(my_handle);
-//     nvs_close(my_handle);
-
-//     FirebaseApp::refresh_token = std::string(refresh_temp);
-//     FirebaseApp::auth_token = std::string(auth_temp);
-
-//     ESP_LOGD(NVS_TAG, "Tokens read");
-//     return err;
-
-// }
 
 FirebaseApp::FirebaseApp(const char* api_key)
     : api_key(api_key)

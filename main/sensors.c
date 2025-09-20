@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "privado.h" //
 
 #define I2C_MASTER_SCL_IO 19
 #define I2C_MASTER_SDA_IO 18
@@ -195,8 +196,8 @@ esp_err_t sensors_read(SensorData *out) {
 void sensors_format_json(const SensorData *d, const char *time_str, const char *fecha_str, const char *inicio_str, char *buf, size_t buf_size) {
     if (!buf || buf_size == 0) return;
     int written = snprintf(buf, buf_size,
-        "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,\"fecha\":\"%s\",\"inicio\":\"%s\",\"ciudad\":\"%s\",\"hora\":\"%s\",\"id\":\"ESP-WROVER-FB\"}",
-        d->pm1p0, d->pm2p5, d->pm4p0, d->pm10p0, d->voc, d->nox, d->avg_temp, d->avg_hum, d->co2, fecha_str, inicio_str, g_city_state, time_str);
+        "{\"pm1p0\":%.2f,\"pm2p5\":%.2f,\"pm4p0\":%.2f,\"pm10p0\":%.2f,\"voc\":%.1f,\"nox\":%.1f,\"cTe\":%.2f,\"cHu\":%.2f,\"co2\":%u,\"fecha\":\"%s\",\"inicio\":\"%s\",\"ciudad\":\"%s\",\"hora\":\"%s\",\"id\":\"%s\"}",
+        d->pm1p0, d->pm2p5, d->pm4p0, d->pm10p0, d->voc, d->nox, d->avg_temp, d->avg_hum, d->co2, fecha_str, inicio_str, g_city_state, time_str, DEVICE_ID);
     if (written < 0 || (size_t)written >= buf_size) {
         if (buf_size) buf[buf_size-1] = '\0';
     }

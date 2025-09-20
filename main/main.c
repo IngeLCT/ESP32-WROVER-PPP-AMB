@@ -175,7 +175,17 @@ static void sensor_task(void *pv) {
             // Log dinámico indicando cada cuántos minutos se está enviando
             int batch_minutes = SAMPLES_PER_BATCH * SAMPLE_EVERY_MIN;
             ESP_LOGI(TAG_APP, "JSON promedio %dm: %s", batch_minutes, json);
-            firebase_push("/historial_mediciones", json);
+
+            /* ===== NUEVO: clave YY-MM-DD_HH-MM y PUT idempotente ===== */
+            char clave_min[18]; // "YY-MM-DD_HH-MM" + '\0' => 17 chars
+            strftime(clave_min, sizeof(clave_min), "%y-%m-%d_%H-%M", &tm_info);
+
+            char path_put[64];
+            snprintf(path_put, sizeof(path_put), "/historial_mediciones/%s", clave_min);
+
+            ESP_LOGI(TAG_APP, "Path: ", path_put);
+            firebase_putData(path_put, json);
+            //firebase_push("/historial_mediciones", json);
 
             // Retención aproximada por tamaño total (~10 MB)
             const size_t MAX_BYTES = 10 * 1024 * 1024;

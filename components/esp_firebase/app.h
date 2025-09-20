@@ -39,7 +39,7 @@ namespace ESPFirebase
             time_t auth_obtained_time = 0;   // epoch cuando se obtuvo el access token
             int auth_expires_in = 0;         // segundos que dura el token
 
-
+            int default_timeout_ms = 20000;
 
             void firebaseClientInit(void);
         
@@ -66,9 +66,10 @@ namespace ESPFirebase
             esp_err_t setHeader(const char* header, const char* value);
             
             void clearHTTPBuffer(void);
-            
-          
 
+            void setHttpTimeoutMs(int ms);
+            void restoreDefaultHttpTimeout();
+            
             FirebaseApp(const char * api_key);
             ~FirebaseApp();
             esp_err_t registerUserAccount(const user_account_t& account);

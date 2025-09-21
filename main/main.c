@@ -183,7 +183,7 @@ static void sensor_task(void *pv) {
             char path_put[64];
             snprintf(path_put, sizeof(path_put), "/historial_mediciones/%s", clave_min);
 
-            ESP_LOGI(TAG_APP, "Path: ", path_put);
+            ESP_LOGI(TAG_APP, "Path: %s", path_put);
             firebase_putData(path_put, json);
             //firebase_push("/historial_mediciones", json);
 

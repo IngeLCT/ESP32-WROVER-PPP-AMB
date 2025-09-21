@@ -21,6 +21,8 @@
 #include "modem_ppp.h"
 #include "esp_modem_api.h"
 
+#include "esp_wifi.h"
+
 static const char *TAG_APP = "app";
 static esp_modem_dce_t *g_dce = NULL;
 static inline int64_t minutes_to_us(int m) { return (int64_t)m * 60 * 1000000; }
@@ -29,6 +31,18 @@ static inline int64_t minutes_to_us(int m) { return (int64_t)m * 60 * 1000000; }
 static char g_city[64]  = "----";
 
 #define LOG_EACH_SAMPLE 1
+
+static void wifi_hard_off(void) {
+    // Ignora errores si no estaba inicializado
+    esp_wifi_stop();
+    esp_wifi_deinit();
+
+    // Borra netifs por si algún código los creó
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta) esp_netif_destroy(sta);
+    esp_netif_t *ap  = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap)  esp_netif_destroy(ap);
+}
 
 static void init_sntp_and_time(void) {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
@@ -237,6 +251,8 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_hard_off();
 
     // === 1) Arranca PPP ===
     modem_ppp_config_t cfg = {

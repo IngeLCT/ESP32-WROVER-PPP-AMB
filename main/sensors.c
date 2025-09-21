@@ -109,6 +109,7 @@ static int sen5x_decode_measurement(const uint8_t *buf, float *pm1, float *pm25,
 
 esp_err_t sensors_init_all(void) {
     ESP_LOGI(TAG_SENS, "Init I2C + sensors...");
+    vTaskDelay(pdMS_TO_TICKS(1500));
     if (s_i2c_bus) {
         ESP_LOGD(TAG_SENS, "I2C bus ya inicializado");
         return ESP_OK;

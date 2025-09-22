@@ -30,7 +30,7 @@
 
 /* Endpoint por defecto (cambia a EU si aplica) */
 #ifndef UNWIRED_URL
-#define UNWIRED_URL "https://us1.unwiredlabs.com/v2/process.php"
+#define UNWIRED_URL "https://us2.unwiredlabs.com/v2/process.php"
 #endif
 
 #ifndef UNWIREDLABS_TOKEN

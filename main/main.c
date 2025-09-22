@@ -33,6 +33,7 @@ static char g_city[64]  = "----";
 #define LOG_EACH_SAMPLE 1
 
 static void wifi_hard_off(void) {
+    
     // Ignora errores si no estaba inicializado
     esp_wifi_stop();
     esp_wifi_deinit();

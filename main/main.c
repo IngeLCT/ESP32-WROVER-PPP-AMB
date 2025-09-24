@@ -192,8 +192,8 @@ static void sensor_task(void *pv) {
             ESP_LOGI(TAG_APP, "JSON promedio %dm: %s", batch_minutes, json);
 
             /* ===== NUEVO: clave YY-MM-DD_HH-MM y PUT idempotente ===== */
-            char clave_min[18]; // "YY-MM-DD_HH-MM" + '\0' => 17 chars
-            strftime(clave_min, sizeof(clave_min), "%y-%m-%d_%H-%M", &tm_info);
+            char clave_min[20]; // "YY-MM-DD_HH-MM-SS" + '\0' => 20 chars
+            strftime(clave_min, sizeof(clave_min), "%y-%m-%d_%H-%M-%S", &tm_info);
 
             char path_put[64];
             snprintf(path_put, sizeof(path_put), "/historial_mediciones/%s", clave_min);

@@ -1,142 +1,60 @@
-# ESP32‑WROVER‑PPP‑AMB — Conexión PPP (A7670/SIM7600) + Firebase — ESP‑IDF 5.5.1
+# ESP32-WROVER-PPP-AMB
 
-> **Estado actual**: este proyecto **sí usa** `esp_modem` para dar Internet al ESP32 vía **PPP sobre módem LTE (A7670/SIM7600)** y después conecta a **Firebase**. Aún **no** está integrado el bloque de **AT+CPSI?** para geolocalización por celda (eso va en la siguiente iteración).
-
----
-
-## 1) Resumen
-- **Objetivo**: dar conectividad IP al ESP32 por PPP (módem 4G) y usarla para autenticarse y enviar datos a **Firebase**.
-- **Framework**: ESP‑IDF **v5.5.1**.
-- **Componente de módem**: `espressif/esp_modem` (v1.4.x o similar) vía Component Manager.
-- **Modo de operación**: **PPP DATA (CMUX desactivado)** por estabilidad. Si más adelante se habilita CMUX, se hará con *fallback* automático.
-- **Notas**:
-  - Se marca la interfaz PPP como **default** y se **fijan DNS** si el APN no provee, para evitar errores `getaddrinfo() 202`.
-  - Sensores/I²C se inicializan **después** de levantar PPP (evita NACKs por picos de consumo del módem).
+Proyecto para **ESP32-WROVER** (ESP-IDF) orientado a **medición ambiental** con **conectividad celular (PPP sobre módem 4G)** y **envío de datos a Firebase Realtime Database**.  
+Incluye **geolocalización aproximada por celdas** usando **Unwired Labs** (a partir de la información de la red celular). Licencia **MIT**.
 
 ---
 
-## 2) Hardware de referencia (T‑A7670X / SIM7600 compatible)
-- **UART del módem**: `TX=GPIO26`, `RX=GPIO27`
-- **Flow control**: **sin RTS/CTS** (puede activarse en el futuro si se requiere mayor throughput/TLS estable)
-- **Líneas de control**:
-  - `DTR = GPIO25`
-  - `RST = GPIO5` (activo **LOW**)
-  - `PWRKEY = GPIO4`
-  - `BOARD_POWERON = GPIO12`
-- **APN**: `internet.itelcel.com` (Telcel MX; sin user/pass)
-- **Alimentación**: fuente capaz de entregar picos >2A al módem. Se recomiendan capacitores de *bulk* (≥470–1000 µF) cerca del módem/sensores.
+## ¿Qué hace?
 
-> Ajusta pines/APN a tu hardware/operador en `modem_ppp.c`/`main.c`.
+- **Mide variables ambientales** (p. ej., PM1.0/2.5/4.0/10, VOC, NOx, CO₂, temperatura, humedad) y arma un **payload JSON** con las lecturas.  
+- Establece **conectividad IP** vía **PPP** usando un **módem 4G (T-A7670X/SIM7600)** y la librería **`esp_modem`** de ESP-IDF.
+- **Envía mediciones a Firebase** mediante **HTTP/REST** (componente `esp_firebase`).  
+- **Obtiene ubicación aproximada** (ciudad/lat-lon) consultando **Unwired Labs** con parámetros de celda obtenidos por **AT** desde el módem.  
+- Permite **configurar claves** y ajustes sensibles en `Privado.h` (no versionado).  
+- **Intervalo de envío configurable** y **promedio local configurable**: el dispositivo acumula **N muestras** y **envía solo el promedio** para reducir ruido/uso de red.
 
 ---
 
-## 3) Dependencias
-- ESP‑IDF 5.5.1 configurado (`idf.py doctor`).
-- Componentes:
-  - `espressif/esp_modem`
-  - `esp_netif`, `esp_http_client`, `esp_crt_bundle`, `json` (cJSON)
-  - Librería de **Firebase** (ya integrada en el proyecto: inicialización y autenticación por email/password)
+## Requisitos
 
-Para añadir esp_modem (si no está bloqueado ya en `dependencies.lock`):
-```bash
-idf.py add-dependency "espressif/esp_modem^1.4.0"
-```
+- **ESP-IDF 5.x** (recomendado 5.5.1) y **Python 3.11.x** para el toolchain.
+- **Target**: `esp32`.  
+- **Hardware**: ESP32-WROVER + **módem 4G T-A7670X/SIM7600** con SIM de datos.  
+- **Firebase Realtime Database** operativo (URL, API Key, y si aplica: email/password).  
+- **Token de Unwired Labs** para geolocalización por celdas.  
+- En `sdkconfig` debe estar habilitado **PPP** (ej.: `CONFIG_LWIP_PPP_SUPPORT=y`).
 
 ---
 
-## 4) Configuración (sdkconfig)
-En `sdkconfig.defaults` asegúrate de:
-```ini
-CONFIG_LWIP_PPP_SUPPORT=y
-# Opcional, para diagnóstico
-# CONFIG_LWIP_PPP_DEBUG_ON=y
-```
-Luego reconfigura una vez:
-```bash
-idf.py reconfigure
-```
+## Funcionalidades
+
+### 1) Conectividad celular (PPP + esp_modem)
+- **Secuencia de encendido** del módem (POWERON/RST/PWRKEY/DTR), **creación del DTE/DCE**, alta de **PPP** y espera a `IP_EVENT_PPP_GOT_IP`.  
+- Interfaz **PPP** marcada como **default** y **fallback de DNS** si el APN no los entrega (para evitar errores `getaddrinfo()`), de acuerdo con el flujo documentado en el repo.
+- Operación estable en modo **DATA** (sin CMUX). *(CMUX puede evaluarse después; el proyecto contempla fallback.)*
+
+### 2) Geolocalización por celdas (Unwired Labs)
+- Obtiene del módem los **parámetros de celda** por **AT** (p. ej., MCC, MNC, LAC/TAC y CID).  
+- Llama al endpoint de **Unwired Labs** para resolver **ubicación aproximada** (útil para etiquetar mediciones o enriquecer el JSON, p. ej. en la clave `ciudad`).  
+- El módulo de apoyo (**`unwiredlabs.c/h`**) está presente en `main/` y forma parte del flujo actual del proyecto.
+
+### 3) Medición ambiental (sensors)
+- Lectura periódica de sensores y construcción de un **JSON** con las claves de medición.  
+- **Promedio local**: se acumulan **N muestras** (configurable) y se **envía el promedio** (reduce picos y ancho de banda).  
+- **Intervalo de envío** configurable.
+
+### 4) Envío de datos a Firebase (components/esp_firebase)
+- Cliente **REST** para **Firebase Realtime Database** con autenticación (API Key y, si aplica, email/password) y operaciones **push/set/remove**.  
+- Uso de **bundle de certificados** de ESP-IDF para **TLS** cuando corresponda.  
+- Estructura de **rutas** y **payloads** pensada para series temporales.
+
+### 5) Configuración y credenciales (Privado.h)
+- **No versionado**. Contiene **APN**, **credenciales de Firebase** y **token de Unwired Labs**.  
+- Evita exponer datos sensibles en logs o control de versiones.
 
 ---
 
-## 5) Estructura relevante
-```
-main/
-├─ main.c                 # app_main: arranca PPP, luego SNTP/sensores/Firebase
-├─ modem_ppp.h/.c         # Encendido HW + DTE/DCE + PPP (DATA) + DNS fallback
-├─ unwiredlabs.h/.c       # (presente) geoloc por celda — **AÚN NO** llamado
-├─ Privado.h              # (no versionar) credenciales/constantes sensibles
-└─ CMakeLists.txt         # registra SRCS y REQUIRES (esp_modem, etc.)
-```
+## Licencia
 
----
-
-## 6) Flujo de arranque en `app_main`
-1. `esp_netif_init()` y `esp_event_loop_create_default()`.
-2. `modem_ppp_start_blocking(...)` con `.use_cmux = false` (DATA). Este paso:
-   - Hace la **secuencia de encendido** del módem (POWERON/RST/PWRKEY/DTR)
-   - Crea `esp_netif` PPP y lo marca como **default**
-   - Crea DTE/DCE (`esp_modem_api`) con APN configurado
-   - Sube **PPP** y espera `IP_EVENT_PPP_GOT_IP`
-   - **Verifica DNS**; si no hay, **fuerza** `1.1.1.1` y `8.8.8.8`
-3. (Opcional) SNTP/RTC.
-4. Inicialización de **sensores/I²C** (con un `vTaskDelay(1000)` previo recomendable).
-5. **Firebase**: autenticación con email/password y operaciones (push/set/remove) según lógica de la app.
-
-> Si más adelante se activa **CMUX**, el código intentará CMUX y si falla hará *fallback* a DATA.
-
----
-
-## 7) Credenciales y seguridad
-- Usa `Privado.h` (ignorado en git) para claves sensibles: API key de Firebase, email/password, token de servicios externos.
-- **No** loguees `post_field` ni credenciales en el monitor serie.
-- Considera **rotar** la contraseña si apareció alguna vez en logs/commits.
-
----
-
-## 8) Compilación, flasheo y monitor
-```bash
-idf.py fullclean
-idf.py build
-idf.py flash monitor
-```
-**Salida esperada mínima**:
-- `PPP UP  ip=... gw=...`
-- Mensajes de conexión/éxito de Firebase (token adquirido).
-
----
-
-## 9) Troubleshooting rápido
-- **`getaddrinfo() 202` / DNS falla**:
-  - Asegura que PPP sea **default** (`esp_netif_set_default_netif(ppp)`).
-  - Si el APN no entrega DNS, el módulo PPP del proyecto **fuerza** `1.1.1.1`/`8.8.8.8`.
-- **Reinicios/errores CMUX**:
-  - Mantén **CMUX desactivado**; usa `esp_modem_pause_net()` para enviar AT de forma puntual.
-  - Si luego activas CMUX: sube `baudrate` y usa **RTS/CTS** si el hardware lo permite.
-- **I²C NACK tras levantar módem**:
-  - Añade `vTaskDelay(500–1500 ms)` antes de inicializar sensores;
-  - Mejora la **alimentación** (picos) y verifica *pull-ups* de I²C.
-- **TLS/HTTP fallan**:
-  - Comprueba **hora** (SNTP) y `esp_crt_bundle` habilitado;
-  - Prueba primero HTTP plano a `http://neverssl.com/` para aislar TLS.
-- **Sin IP PPP**:
-  - Verifica **APN** correcto, señal y SIM (PIN)
-  - Aumenta LOG a `esp_modem` y `ppp` para ver negociaciones LCP/IPCP.
-
----
-
-## 10) Roadmap inmediato
-- ✅ Establecer conexión a **Firebase** usando PPP.
-- ⏭️ Añadir **AT+CPSI?** + `AT+COPS?/AT+CEREG?` como respaldo, con pausa de red (`esp_modem_pause_net`) y envío a **Unwired Labs** para obtener ciudad/estado/fecha/hora. (Código helper ya incluido en `unwiredlabs.c`, pendiente de invocar.)
-- ⏭️ Evaluar **RTS/CTS** y mayor baudrate si se sube el tráfico/TLS.
-
----
-
-## 11) Licencia
-Este repo hereda las licencias de los componentes de terceros utilizados (ESP‑IDF, esp_modem, FirebaseClient, etc.). Revisa cada componente para detalles.
-
----
-
-## 12) Notas finales
-- Los pines y el APN aquí documentados son los que han dado conexión en las pruebas iniciales. Si cambias de carrier/placa, actualiza este README.
-- Si encuentras inestabilidad, captura **logs completos** desde `boot:` hasta el fallo e incluye el nivel de log de `esp_modem`/`ppp`.
-
+Distribuido bajo **MIT**. Consulta el archivo `LICENSE` en el repositorio.

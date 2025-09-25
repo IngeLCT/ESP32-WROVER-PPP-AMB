@@ -1,6 +1,6 @@
 # ESP32-WROVER-PPP-AMB
 
-Proyecto para **ESP32-WROVER** (ESP-IDF) orientado a **medición ambiental** con **conectividad celular (PPP sobre módem 4G)** y **envío de datos a Firebase Realtime Database**.  
+Proyecto para **ESP32-WROVER** (ESP-IDF) orientado a **medición ambiental** con **conectividad celular (PPP sobre módem 4G LTE)** y **envío de datos a Firebase Realtime Database**.  
 Incluye **geolocalización aproximada por celdas** usando **Unwired Labs** (a partir de la información de la red celular). Licencia **MIT**.
 
 ---
@@ -8,7 +8,7 @@ Incluye **geolocalización aproximada por celdas** usando **Unwired Labs** (a pa
 ## ¿Qué hace?
 
 - **Mide variables ambientales** (p. ej., PM1.0/2.5/4.0/10, VOC, NOx, CO₂, temperatura, humedad) y arma un **payload JSON** con las lecturas.  
-- Establece **conectividad IP** vía **PPP** usando un **módem 4G (T-A7670X/SIM7600)** y la librería **`esp_modem`** de ESP-IDF.
+- Establece **conectividad IP** vía **PPP** usando un **módem 4G LTE (T-A7670X/SIM7600)** y la librería **`esp_modem`** de ESP-IDF.
 - **Envía mediciones a Firebase** mediante **HTTP/REST** (componente `esp_firebase`).  
 - **Obtiene ubicación aproximada** (ciudad/lat-lon) consultando **Unwired Labs** con parámetros de celda obtenidos por **AT** desde el módem.  
 - Permite **configurar claves** y ajustes sensibles en `Privado.h` (no versionado).  
@@ -20,7 +20,7 @@ Incluye **geolocalización aproximada por celdas** usando **Unwired Labs** (a pa
 
 - **ESP-IDF 5.x** (recomendado 5.5.1) y **Python 3.11.x** para el toolchain.
 - **Target**: `esp32`.  
-- **Hardware**: ESP32-WROVER + **módem 4G T-A7670X/SIM7600** con SIM de datos.  
+- **Hardware**: ESP32-WROVER + **módem 4G LTE T-A7670X/SIM7600** con SIM de datos.  
 - **Firebase Realtime Database** operativo (URL, API Key, y si aplica: email/password).  
 - **Token de Unwired Labs** para geolocalización por celdas.  
 - En `sdkconfig` debe estar habilitado **PPP** (ej.: `CONFIG_LWIP_PPP_SUPPORT=y`).
